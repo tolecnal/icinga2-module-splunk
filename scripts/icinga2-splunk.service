@@ -1,0 +1,27 @@
+[Unit]
+Description=Icinga2 to Splunk Event Stream Integration
+After=network.target icinga2.service
+Wants=icinga2.service
+
+[Service]
+Type=simple
+User=nagios
+Group=nagios
+WorkingDirectory=/usr/local/bin/icinga2_splunk
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/usr/bin/python3 /usr/local/bin/icinga2_splunk/event_stream_client.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/icinga2
+
+[Install]
+WantedBy=multi-user.target
+

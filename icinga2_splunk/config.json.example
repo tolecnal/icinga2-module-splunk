@@ -1,0 +1,27 @@
+{
+  "icinga2_api_url": "https://icinga2.example.com:5665",
+  "icinga2_api_username": "root",
+  "icinga2_api_password": "your-api-password",
+  "icinga2_api_verify_ssl": false,
+  
+  "event_stream_queue": "splunk-integration",
+  "event_stream_types": [
+    "CheckResult",
+    "StateChange",
+    "Notification",
+    "AcknowledgementSet",
+    "CommentAdded",
+    "DowntimeAdded"
+  ],
+  "event_stream_filter": null,
+  
+  "splunk_hec_url": "https://splunk.example.com:8088/services/collector",
+  "splunk_hec_token": "your-hec-token-here",
+  "splunk_verify_ssl": true,
+  "splunk_index_events": "icinga2_events",
+  "splunk_index_perfdata": "icinga2_perfdata",
+  
+  "splunk_batch_size": 100,
+  "splunk_batch_interval": 5
+}
+
