@@ -14,7 +14,7 @@ A Python-based integration that streams monitoring data from Icinga2 to Splunk u
 
 ## Architecture
 
-\`\`\`
+```
 Icinga2 API (Event Streams)
 ↓
 Event Stream Client
@@ -26,7 +26,7 @@ Splunk HEC Client (with batching)
 Splunk Indexes
 ├── icinga2_events (state changes, notifications, etc.)
 └── icinga2_perfdata (performance metrics)
-\`\`\`
+```
 
 ## Prerequisites
 
@@ -39,16 +39,16 @@ Splunk Indexes
 
 ### 1. Clone or download this repository
 
-\`\`\`bash
+```bash
 git clone <repository-url>
 cd icinga2-splunk-integration
-\`\`\`
+```
 
 ### 2. Run the installation script
 
-\`\`\`bash
+```bash
 sudo ./scripts/install.sh
-\`\`\`
+```
 
 This will:
 
@@ -61,23 +61,24 @@ This will:
 
 Ensure the Icinga2 API is enabled and you have credentials:
 
-\`\`\`bash
+```bash
 icinga2 api setup
-\`\`\`
+```
 
 Create an API user in `/etc/icinga2/conf.d/api-users.conf`:
 
-\`\`\`
+```
 object ApiUser "splunk" {
 password = "your-secure-password"
 permissions = [ "events/*" ]
 }
-\`\`\`
+```
 
 Restart Icinga2:
-\`\`\`bash
+
+```bash
 systemctl restart icinga2
-\`\`\`
+```
 
 ### 4. Configure Splunk HEC
 
@@ -92,45 +93,46 @@ In Splunk:
 4. Save and copy the token
 
 Create the indexes if they don't exist:
-\`\`\`
+
+```
 Settings > Indexes > New Index
 
 - Index Name: icinga2_events
 - Index Name: icinga2_perfdata
-  \`\`\`
+```
 
 ### 5. Configure the Integration
 
 Edit `/etc/icinga2/splunk_config.json`:
 
-\`\`\`json
+```json
 {
-"icinga2_api_url": "https://localhost:5665",
-"icinga2_api_username": "splunk",
-"icinga2_api_password": "your-secure-password",
-"icinga2_api_verify_ssl": false,
+  "icinga2_api_url": "https://localhost:5665",
+  "icinga2_api_username": "splunk",
+  "icinga2_api_password": "your-secure-password",
+  "icinga2_api_verify_ssl": false,
 
-"splunk_hec_url": "https://splunk.example.com:8088/services/collector",
-"splunk_hec_token": "your-hec-token-here",
-"splunk_verify_ssl": true,
-"splunk_index_events": "icinga2_events",
-"splunk_index_perfdata": "icinga2_perfdata"
+  "splunk_hec_url": "https://splunk.example.com:8088/services/collector",
+  "splunk_hec_token": "your-hec-token-here",
+  "splunk_verify_ssl": true,
+  "splunk_index_events": "icinga2_events",
+  "splunk_index_perfdata": "icinga2_perfdata"
 }
-\`\`\`
+```
 
 ### 6. Test the Connection
 
-\`\`\`bash
+```bash
 /usr/local/bin/icinga2_splunk/test_connection.py
-\`\`\`
+```
 
 ### 7. Start the Service
 
-\`\`\`bash
+```bash
 sudo systemctl enable icinga2-splunk
 sudo systemctl start icinga2-splunk
 sudo systemctl status icinga2-splunk
-\`\`\`
+```
 
 ## Configuration Options
 
