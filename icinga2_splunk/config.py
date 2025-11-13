@@ -1,3 +1,12 @@
+"""Configuration handling for the Icinga2 -> Splunk integration.
+
+This module provides the `Config` class which loads configuration from a
+JSON file (by default `/etc/icinga2/splunk_config.json`) and supports
+overriding values via environment variables. It also validates required
+settings and exposes configuration values via attribute or dict-style
+access.
+"""
+
 import json
 import os
 import logging
@@ -42,8 +51,11 @@ class Config:
         try:
             with open(self.config_path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception as e:
-            raise Exception(f"Failed to load config from {self.config_path}: {e}")
+        except (OSError, json.JSONDecodeError) as e:
+            # Raise a clearer error type for callers to handle
+            raise ValueError(
+                f"Failed to load config from {self.config_path}: {e}"
+            ) from e
 
     def _apply_env_overrides(self):
         """Override config with environment variables"""

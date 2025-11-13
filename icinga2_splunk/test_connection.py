@@ -74,7 +74,7 @@ def test_icinga2_api(config):
     except requests.exceptions.Timeout:
         print("✗ Connection timeout after 10 seconds")
         return False
-    except Exception as e:
+    except requests.exceptions.RequestException as e:
         print(f"✗ Error: {str(e)}")
         return False
 
@@ -130,7 +130,7 @@ def test_icinga2_hosts(config):
             print(f"  Response: {response.text}")
             return False
 
-    except Exception as e:
+    except requests.exceptions.RequestException as e:
         print(f"✗ Error: {str(e)}")
         return False
 
@@ -192,7 +192,7 @@ def test_event_stream(config):
     except requests.exceptions.Timeout:
         print("✗ Connection timeout")
         return False
-    except Exception as e:
+    except requests.exceptions.RequestException as e:
         print(f"✗ Error: {str(e)}")
         return False
 
@@ -255,6 +255,13 @@ def test_splunk_hec(config):
 
 
 def main():
+    """Run a series of connectivity checks for Icinga2 and Splunk.
+
+    This helper script is intended to be executed manually to validate
+    connectivity and configuration prior to deploying the Event Stream
+    client as a service.
+    """
+
     print("Icinga2 to Splunk Integration - Connection Test")
     print("=" * 50)
 

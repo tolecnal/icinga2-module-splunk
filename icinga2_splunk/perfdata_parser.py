@@ -66,7 +66,7 @@ class PerfdataParser:
                         "max": max_val,
                     }
                 )
-            except Exception as e:
+            except (ValueError, TypeError, IndexError) as e:
                 logger.warning("Failed to parse metric: %s - %s", match.group(0), e)
                 continue
 

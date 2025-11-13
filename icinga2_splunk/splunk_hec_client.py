@@ -64,7 +64,15 @@ class SplunkHECClient:
     def send_event(
         self, event_data, host=None, sourcetype=None, timestamp=None, index_name=None
     ):
-        """Add event to batch queue"""
+        """Add event to the internal batch queue.
+
+        Args:
+            event_data (dict): Event payload to send to Splunk HEC.
+            host (str, optional): Host field for the event.
+            sourcetype (str, optional): Splunk sourcetype to tag the event with.
+            timestamp (float, optional): Event timestamp (epoch seconds).
+            index_name (str, optional): Splunk index name override.
+        """
         should_flush = False
 
         with self.events_lock:
@@ -85,7 +93,14 @@ class SplunkHECClient:
             self._flush_events()
 
     def send_perfdata(self, perfdata, host=None, timestamp=None, index_name=None):
-        """Add performance data to batch queue"""
+        """Add parsed performance metric to the perfdata batch queue.
+
+        Args:
+            perfdata (dict): Metric payload prepared for Splunk.
+            host (str, optional): Host name associated with the metric.
+            timestamp (float, optional): Event timestamp (epoch seconds).
+            index_name (str, optional): Splunk index name override.
+        """
         should_flush = False
         batch_count = 0
 
@@ -116,7 +131,11 @@ class SplunkHECClient:
             self._flush_perfdata()
 
     def _flush_events(self):
-        """Flush events batch to Splunk"""
+        """Flush the accumulated events batch to Splunk HEC.
+
+        This builds a newline-delimited payload and posts it to the HEC
+        collector endpoint. Network and payload errors are handled and logged.
+        """
         with self.events_lock:
             if not self.events_batch:
                 return
@@ -170,11 +189,15 @@ class SplunkHECClient:
                     response.text,
                 )
 
-        except Exception as e:
-            logger.error("Error flushing events to Splunk: %s", e)
+        except (requests.exceptions.RequestException, ValueError) as e:
+            logger.error("Error flushing events to Splunk: %s", e, exc_info=True)
 
     def _flush_perfdata(self):
-        """Flush performance data batch to Splunk"""
+        """Flush the accumulated performance metrics batch to Splunk HEC.
+
+        Similar to `_flush_events`, this prepares newline-delimited JSON and
+        sends it to the collector endpoint. Network errors are logged.
+        """
         with self.perfdata_lock:
             if not self.perfdata_batch:
                 return
@@ -234,10 +257,16 @@ class SplunkHECClient:
                     response.text,
                 )
 
-        except Exception as e:
+        except (requests.exceptions.RequestException, ValueError) as e:
             logger.error("Error flushing perfdata to Splunk: %s", e, exc_info=True)
 
     def flush(self):
-        """Force flush all pending data"""
+        """Force flush of all pending events and performance metrics.
+
+        This method synchronously flushes both the events and perfdata
+        queues to Splunk HEC. It is safe to call from shutdown handlers
+        and will attempt to send any buffered items immediately.
+        """
+        # Flush events first, then perfdata to preserve relative ordering
         self._flush_events()
         self._flush_perfdata()

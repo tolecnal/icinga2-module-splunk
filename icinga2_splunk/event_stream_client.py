@@ -56,7 +56,12 @@ class EventStreamClient:
         )  # 5 minutes default
 
     def _should_process_event(self, event_type, event_data):
-        """Determine if an event should be processed based on filters"""
+        """Return True if the event should be processed.
+
+        Checks configuration flags to decide whether a particular event
+        type should be forwarded to Splunk. For `CheckResult` events this
+        also applies any configured state filters.
+        """
         # Check if event type is enabled
         if event_type == "CheckResult" and not self.config.get(
             "include_check_results", False
@@ -74,7 +79,13 @@ class EventStreamClient:
         return True
 
     def _connect_and_consume(self):
-        """Connect to Icinga2 Event Stream and consume events"""
+        """Subscribe to the Icinga2 event stream and consume events.
+
+        Posts a subscription request to the Icinga2 API and iterates the
+        streaming response. Parsed events are dispatched to processing
+        methods. Returns False on error to let the caller (start) decide
+        whether to reconnect.
+        """
         url = f"{self.config['icinga2_api_url']}/v1/events"
 
         auth = None
@@ -172,7 +183,8 @@ class EventStreamClient:
                     self._process_event(event)
                 except json.JSONDecodeError as e:
                     logger.error("Failed to parse event JSON: %s", e)
-                except Exception as e:
+                except (ValueError, KeyError, TypeError, RuntimeError) as e:
+                    # Common parsing/processing errors — log and continue
                     logger.exception("Error processing event: %s", e)
             if self.running:
                 logger.warning("Event Stream connection closed by server")
@@ -194,7 +206,12 @@ class EventStreamClient:
                     pass
 
     def _heartbeat_monitor(self):
-        """Monitor for silent connection failures by checking time since last event"""
+        """Background thread that detects silent connection failures.
+
+        If no events are received for longer than `heartbeat_timeout` the
+        current HTTP session is closed to trigger a reconnect in the main
+        loop.
+        """
         while self.running:
             time.sleep(30)  # Check every 30 seconds
 
@@ -205,19 +222,26 @@ class EventStreamClient:
 
             if time_since_last_event > self.heartbeat_timeout:
                 logger.error(
-                    f"No events received for {int(time_since_last_event)} seconds (timeout: {self.heartbeat_timeout}s) - connection appears dead"
+                    "No events received for %s seconds (timeout: %s) - connection appears dead",
+                    int(time_since_last_event),
+                    self.heartbeat_timeout,
                 )
                 # Close the session to force reconnection
                 if self.session:
                     try:
                         self.session.close()
                         logger.info("Closed stale session to force reconnection")
-                    except Exception as e:
+                    except OSError as e:
                         logger.error("Error closing stale session: %s", e)
                 break
 
     def _process_event(self, event):
-        """Process a single event from the stream"""
+        """Dispatch a parsed event to the appropriate handler.
+
+        The method inspects the event `type` field and calls the
+        corresponding `_process_*` method. Unknown event types are
+        ignored.
+        """
         event_type = event.get("type")
 
         if not event_type:
@@ -240,7 +264,12 @@ class EventStreamClient:
             logger.debug("Unhandled event type: %s", event_type)
 
     def _process_check_result(self, event):
-        """Process CheckResult event"""
+        """Handle `CheckResult` events and optionally forward them.
+
+        Depending on configuration the raw check result may be forwarded
+        as an event to Splunk. Performance data embedded in the result is
+        parsed and forwarded separately.
+        """
         check_result = event.get("check_result", {})
         host = event.get("host")
         service = event.get("service")
@@ -297,7 +326,7 @@ class EventStreamClient:
                 logger.debug("[PERFDATA DEBUG] No perfdata for %s!%s", host, service)
 
     def _process_state_change(self, event):
-        """Process StateChange event"""
+        """Handle `StateChange` events and forward to Splunk."""
         host = event.get("host")
         service = event.get("service")
         check_result = event.get("check_result", {})
@@ -331,7 +360,7 @@ class EventStreamClient:
             )
 
     def _process_notification(self, event):
-        """Process Notification event"""
+        """Handle `Notification` events and forward to Splunk."""
         host = event.get("host")
         service = event.get("service")
 
@@ -356,7 +385,7 @@ class EventStreamClient:
         )
 
     def _process_acknowledgement(self, event):
-        """Process Acknowledgement events"""
+        """Handle acknowledgement events and forward to Splunk."""
         host = event.get("host")
         service = event.get("service")
 
@@ -379,7 +408,7 @@ class EventStreamClient:
         )
 
     def _process_comment(self, event):
-        """Process Comment events"""
+        """Handle comment events and forward to Splunk."""
         host = event.get("host")
         service = event.get("service")
 
@@ -402,7 +431,7 @@ class EventStreamClient:
         )
 
     def _process_downtime(self, event):
-        """Process Downtime events"""
+        """Handle downtime events and forward to Splunk."""
         host = event.get("host")
         service = event.get("service")
 
@@ -427,7 +456,12 @@ class EventStreamClient:
         )
 
     def _process_perfdata(self, perfdata, host, service, timestamp):
-        """Process performance data from check results"""
+        """Parse and forward performance data extracted from check results.
+
+        Accepts perfdata as a string, a list of strings, or a list of
+        dictionaries. Normalizes values and sends individual metrics to
+        the Splunk perfdata index.
+        """
         object_name = f"{host}!{service}" if service else host
 
         # Handle different perfdata formats
@@ -479,11 +513,15 @@ class EventStreamClient:
                         "splunk_index_perfdata", "icinga2_perfdata"
                     ),
                 )
-        except Exception as e:
+        except (ValueError, KeyError, TypeError) as e:
             logger.error("Error parsing performance data: %s", e)
 
     def start(self):
-        """Start the Event Stream client"""
+        """Start the client's main loop and manage reconnects.
+
+        This method blocks until `stop()` is called. It will attempt to
+        reconnect when the stream closes or on errors.
+        """
         self.running = True
         logger.info("Starting Icinga2 to Splunk Event Stream client")
 
@@ -520,7 +558,11 @@ class EventStreamClient:
                 time.sleep(10)
 
     def stop(self):
-        """Stop the Event Stream client"""
+        """Stop the client, close the session and flush pending data.
+
+        After calling this method the main loop will exit and pending
+        batches will be flushed to Splunk.
+        """
         logger.info("Stopping Icinga2 to Splunk Event Stream client")
         self.running = False
 
@@ -532,7 +574,7 @@ class EventStreamClient:
         logger.info("Client stopped")
 
 
-def signal_handler(signum, frame):
+def signal_handler(signum, _frame):
     """Handle shutdown signals"""
     logger.info("Received signal %s, shutting down...", signum)
     client_obj = globals().get("client")
@@ -545,6 +587,13 @@ def signal_handler(signum, frame):
 
 
 def main():
+    """Entry point for the Event Stream client when run as a script.
+
+    This registers signal handlers, loads configuration and starts the
+    `EventStreamClient`. Intended to be executed via ``python -m
+    icinga2_splunk.event_stream_client`` or as a module script.
+    """
+
     # Register signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
