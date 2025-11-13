@@ -3,24 +3,23 @@
   "icinga2_api_username": "api-user",
   "icinga2_api_password": "your-password",
   "icinga2_api_verify_ssl": false,
-  
+
   "splunk_hec_url": "https://splunk-server:8088",
   "splunk_hec_token": "your-hec-token",
   "splunk_verify_ssl": true,
   "splunk_index_events": "icinga2_events",
   "splunk_index_perfdata": "icinga2_perfdata",
- 
+
   "event_types": ["StateChange", "Notification", "AcknowledgementSet", "AcknowledgementCleared", "DowntimeAdded", "DowntimeRemoved"],
-  
+
   "include_check_results": false,
   "check_result_state_filter": [1, 2, 3],
   "include_perfdata": true,
-  
+
   "event_stream_filter": "",
-  
+
   "batch_size": 100,
   "batch_timeout": 10,
-  
+
   "log_level": "INFO"
 }
-
