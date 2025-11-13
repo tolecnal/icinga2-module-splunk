@@ -4,13 +4,9 @@ Test connection to Icinga2 API, Splunk HEC, and Event Streams
 """
 
 import sys
-import os
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-import json
 import requests
-from config import Config
+from icinga2_splunk.config import Config
 
 # Disable SSL warnings if verify_ssl is False
 import urllib3

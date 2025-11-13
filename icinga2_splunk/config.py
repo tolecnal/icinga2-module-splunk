@@ -6,6 +6,18 @@ logger = logging.getLogger(__name__)
 
 
 class Config:
+    """Configuration loader and accessor for the Icinga2-Splunk integration.
+
+    This class loads configuration from a JSON file (path can be overridden by
+    the `ICINGA2_SPLUNK_CONFIG` environment variable) and allows overriding
+    values using environment variables. Config values are available via
+    attribute access (e.g. ``config.icinga2_api_url``) or dict-style access
+    (e.g. ``config['icinga2_api_url']``).
+
+    The instance provides validation for required settings and fills sensible
+    defaults for optional values.
+    """
+
     def __init__(self, config_path=None):
         if config_path is None:
             config_path = os.environ.get(

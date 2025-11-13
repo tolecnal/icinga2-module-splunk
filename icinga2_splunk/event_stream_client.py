@@ -3,11 +3,7 @@
 Icinga2 Event Stream to Splunk Integration Client
 """
 
-import os
 import sys
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 import json
 import logging
 import signal
@@ -16,9 +12,9 @@ import time
 
 import requests
 import urllib3
-from config import Config
-from perfdata_parser import PerfdataParser
-from splunk_hec_client import SplunkHECClient
+from icinga2_splunk.config import Config
+from icinga2_splunk.perfdata_parser import PerfdataParser
+from icinga2_splunk.splunk_hec_client import SplunkHECClient
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -27,6 +23,16 @@ logger = logging.getLogger(__name__)
 
 
 class EventStreamClient:
+    """Client that subscribes to Icinga2 event streams and forwards events to Splunk.
+
+    This class manages a persistent connection to the Icinga2 Event Stream API,
+    routes different event types to appropriate handlers, optionally parses
+    performance data and sends events/metrics to a `SplunkHECClient` instance.
+
+    Args:
+        config_dict (dict): Configuration dictionary as produced by `Config.config`.
+    """
+
     def __init__(self, config_dict):
         self.config = config_dict
 
@@ -183,7 +189,8 @@ class EventStreamClient:
             if self.session:
                 try:
                     self.session.close()
-                except:
+                except Exception:
+                    # Ignore errors closing the session
                     pass
 
     def _heartbeat_monitor(self):
@@ -487,7 +494,7 @@ class EventStreamClient:
                 if reconnect_count > 0:
                     logger.info("Reconnection attempt #%s", reconnect_count)
 
-                success = self._connect_and_consume()
+                self._connect_and_consume()
 
                 if not self.running:
                     logger.info("Shutdown requested, exiting")
@@ -528,8 +535,12 @@ class EventStreamClient:
 def signal_handler(signum, frame):
     """Handle shutdown signals"""
     logger.info("Received signal %s, shutting down...", signum)
-    if "client" in globals():
-        client.stop()
+    client_obj = globals().get("client")
+    if client_obj:
+        try:
+            client_obj.stop()
+        except Exception:
+            logger.exception("Error stopping client during signal handling")
     sys.exit(0)
 
 

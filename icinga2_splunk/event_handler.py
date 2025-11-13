@@ -6,9 +6,7 @@ Processes state changes for hosts and services
 
 import os
 import sys
-import json
 import logging
-from typing import Dict, Any
 from datetime import datetime
 from splunk_hec_client import SplunkHECClient
 

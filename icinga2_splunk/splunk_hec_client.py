@@ -15,6 +15,14 @@ logger = logging.getLogger(__name__)
 
 
 class SplunkHECClient:
+    """Client for sending events and performance metrics to Splunk HEC.
+
+    This client batches events and perfdata and flushes them either when the
+    configured batch size is reached or when a periodic flush timer fires.
+    It is safe to call from multiple threads; internal locks protect each
+    batch queue.
+    """
+
     def __init__(
         self, hec_url, hec_token, verify_ssl=True, batch_size=100, batch_timeout=10
     ):
