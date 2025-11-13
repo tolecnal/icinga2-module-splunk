@@ -8,8 +8,8 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import requests
 import json
+import requests
 from config import Config
 
 # Disable SSL warnings if verify_ssl is False

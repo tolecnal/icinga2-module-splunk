@@ -1,9 +1,15 @@
-import requests
+#!/usr/bin/env python3
+"""
+Icinga2 Event Stream to Splunk Integration Client
+"""
+
 import json
 import time
 import threading
 import logging
 import urllib3
+import requests
+
 
 logger = logging.getLogger(__name__)
 

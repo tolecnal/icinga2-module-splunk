@@ -3,21 +3,22 @@
 Icinga2 Event Stream to Splunk Integration Client
 """
 
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import requests
 import json
-import time
-import signal
 import logging
-import urllib3
+import signal
 import threading
+import time
+
+import requests
+import urllib3
 from config import Config
-from splunk_hec_client import SplunkHECClient
 from perfdata_parser import PerfdataParser
+from splunk_hec_client import SplunkHECClient
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
