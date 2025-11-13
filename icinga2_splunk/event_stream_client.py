@@ -16,9 +16,7 @@ from icinga2_splunk.config import Config
 from icinga2_splunk.perfdata_parser import PerfdataParser
 from icinga2_splunk.splunk_hec_client import SplunkHECClient
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
