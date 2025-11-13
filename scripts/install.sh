@@ -12,8 +12,8 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 # Install Python dependencies
-echo "Installing Python dependencies..."
-pip3 install requests
+# echo "Installing Python dependencies..."
+# pip3 install requests
 
 # Create directories
 echo "Creating directories..."

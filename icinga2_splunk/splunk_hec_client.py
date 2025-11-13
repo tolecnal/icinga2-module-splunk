@@ -1,185 +1,196 @@
-"""
-Splunk HTTP Event Collector (HEC) Client
-Handles sending events to Splunk with batching and retry logic
-"""
-
-import json
-import logging
-import time
 import requests
-from typing import Dict, Any, Optional
-from queue import Queue, Empty
+import json
+import time
 import threading
+import logging
+import urllib3
 
+logger = logging.getLogger(__name__)
 
 class SplunkHECClient:
-    """Client for sending events to Splunk HEC"""
-
-    def __init__(self, config):
-        self.config = config
-        self.logger = logging.getLogger(__name__)
-
-        # Event queue for batching
-        self.event_queue = Queue(maxsize=10000)
-        self.batch_size = config.splunk_batch_size
-        self.batch_interval = config.splunk_batch_interval
-
-        # Worker thread for sending events
-        self.running = False
-        self.worker_thread = None
-
-        # Setup session for connection pooling
-        self.session = requests.Session()
-        self.session.headers.update(
-            {
-                "Authorization": f"Splunk {config.splunk_hec_token}",
-                "Content-Type": "application/json",
-            }
-        )
-
-        # Start worker thread
-        self.start()
-
-    def start(self):
-        """Start the worker thread"""
-        if not self.running:
-            self.running = True
-            self.worker_thread = threading.Thread(target=self._worker, daemon=True)
-            self.worker_thread.start()
-            self.logger.info("Splunk HEC client started")
-
-    def stop(self):
-        """Stop the worker thread"""
-        self.running = False
-        if self.worker_thread:
-            self.worker_thread.join(timeout=5)
-        self.logger.info("Splunk HEC client stopped")
-
-    def shutdown(self):
-        """Gracefully shutdown, flushing remaining events"""
-        self.logger.info("Shutting down Splunk HEC client...")
-        self.stop()
-
-        # Flush remaining events
-        if not self.event_queue.empty():
-            self.logger.info(f"Flushing {self.event_queue.qsize()} remaining events")
-            self._send_batch(self._get_batch(self.event_queue.qsize()))
-
-    def send_event(
-        self,
-        event_data: Dict[str, Any],
-        index: Optional[str] = None,
-        sourcetype: Optional[str] = None,
-        source: Optional[str] = None,
-        host: Optional[str] = None,
-        timestamp: Optional[float] = None,
-    ):
-        """
-        Queue an event to be sent to Splunk
-
-        Args:
-            event_data: Event data dictionary
-            index: Splunk index (optional, uses default if not specified)
-            sourcetype: Splunk sourcetype
-            source: Event source
-            host: Host name
-            timestamp: Event timestamp (Unix epoch)
-        """
-        event = {
-            "event": event_data,
-            "time": timestamp or time.time(),
-        }
-
-        if index:
-            event["index"] = index
-        if sourcetype:
-            event["sourcetype"] = sourcetype
-        if source:
-            event["source"] = source
-        if host:
-            event["host"] = host
-
+    def __init__(self, hec_url, hec_token, verify_ssl=True, batch_size=100, batch_timeout=10):
+        self.hec_url = hec_url.rstrip('/')
+        self.hec_token = hec_token
+        self.verify_ssl = verify_ssl
+        self.batch_size = batch_size
+        self.batch_timeout = batch_timeout
+        
+        if not verify_ssl:
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        
+        self.events_batch = []
+        self.perfdata_batch = []
+        self.events_lock = threading.Lock()
+        self.perfdata_lock = threading.Lock()
+        
+        # Start flush timers
+        self._start_flush_timers()
+    
+    def _start_flush_timers(self):
+        """Start background threads to flush batches periodically"""
+        def flush_events_timer():
+            while True:
+                time.sleep(self.batch_timeout)
+                self._flush_events()
+        
+        def flush_perfdata_timer():
+            while True:
+                time.sleep(self.batch_timeout)
+                self._flush_perfdata()
+        
+        events_thread = threading.Thread(target=flush_events_timer, daemon=True)
+        perfdata_thread = threading.Thread(target=flush_perfdata_timer, daemon=True)
+        events_thread.start()
+        perfdata_thread.start()
+    
+    def send_event(self, event_data, host=None, sourcetype=None, timestamp=None, index_name=None):
+        """Add event to batch queue"""
+        should_flush = False
+        
+        with self.events_lock:
+            self.events_batch.append({
+                'event_data': event_data,
+                'host': host,
+                'sourcetype': sourcetype,
+                'timestamp': timestamp,
+                'index_name': index_name
+            })
+            
+            if len(self.events_batch) >= self.batch_size:
+                should_flush = True
+        
+        if should_flush:
+            self._flush_events()
+    
+    def send_perfdata(self, perfdata, host=None, timestamp=None, index_name=None):
+        """Add performance data to batch queue"""
+        should_flush = False
+        batch_count = 0
+        
+        with self.perfdata_lock:
+            self.perfdata_batch.append({
+                'perfdata': perfdata,
+                'host': host,
+                'timestamp': timestamp,
+                'index_name': index_name
+            })
+            
+            batch_count = len(self.perfdata_batch)
+            logger.debug(f"[BATCH] Added perfdata for {host}, batch now has {batch_count} items")
+            
+            if batch_count >= self.batch_size:
+                should_flush = True
+        
+        if should_flush:
+            logger.debug(f"[BATCH] Batch size reached ({batch_count}), flushing perfdata")
+            self._flush_perfdata()
+    
+    def _flush_events(self):
+        """Flush events batch to Splunk"""
+        with self.events_lock:
+            if not self.events_batch:
+                return
+            
+            batch = self.events_batch.copy()
+            self.events_batch.clear()
+        
         try:
-            self.event_queue.put(event, block=False)
-        except:
-            self.logger.error("Event queue is full, dropping event")
+            # Build payload for batch sending
+            payload_lines = []
+            for item in batch:
+                event = {
+                    'event': item['event_data'],
+                    'sourcetype': item.get('sourcetype', 'icinga2:event'),
+                    'host': item.get('host', 'icinga2'),
+                }
+                
+                if item.get('timestamp'):
+                    event['time'] = item['timestamp']
+                
+                if item.get('index_name'):
+                    event['index'] = item['index_name']
+                
+                payload_lines.append(json.dumps(event))
+            
+            payload = '\n'.join(payload_lines)
+            
+            logger.info(f"Sending {len(batch)} events to Splunk (index: {batch[0].get('index_name', 'default')})")
+            
+            response = requests.post(
+                f'{self.hec_url}/services/collector/event',
+                headers={
+                    'Authorization': f'Splunk {self.hec_token}',
+                    'Content-Type': 'application/json'
+                },
+                data=payload,
+                verify=self.verify_ssl,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                logger.info(f"Successfully sent {len(batch)} events to Splunk")
+            else:
+                logger.error(f"Failed to send events to Splunk: {response.status_code} - {response.text}")
+                
+        except Exception as e:
+            logger.error(f"Error flushing events to Splunk: {e}")
+    
+    def _flush_perfdata(self):
+        """Flush performance data batch to Splunk"""
+        with self.perfdata_lock:
+            if not self.perfdata_batch:
+                return
+            
+            batch = self.perfdata_batch.copy()
+            self.perfdata_batch.clear()
+        
+        logger.debug(f"[FLUSH] Starting flush of {len(batch)} perfdata items to Splunk")
+        
+        try:
+            # Build payload for batch sending
+            payload_lines = []
+            for item in batch:
+                event = {
+                    'event': item['perfdata'],
+                    'sourcetype': 'icinga2:perfdata',
+                    'host': item.get('host', 'icinga2'),
+                }
+                
+                if item.get('timestamp'):
+                    event['time'] = item['timestamp']
+                
+                if item.get('index_name'):
+                    event['index'] = item['index_name']
+                
+                payload_lines.append(json.dumps(event))
+            
+            payload = '\n'.join(payload_lines)
+            
+            logger.debug(f"[FLUSH] Sending POST request to Splunk HEC...")
+            
+            response = requests.post(
+                f'{self.hec_url}/services/collector/event',
+                headers={
+                    'Authorization': f'Splunk {self.hec_token}',
+                    'Content-Type': 'application/json'
+                },
+                data=payload,
+                verify=self.verify_ssl,
+                timeout=30
+            )
+            
+            logger.debug(f"[FLUSH] Splunk responded with status code: {response.status_code}")
+            
+            if response.status_code == 200:
+                logger.info(f"✓ Successfully sent {len(batch)} performance metrics to Splunk")
+            else:
+                logger.error(f"Failed to send perfdata to Splunk: {response.status_code} - {response.text}")
+                
+        except Exception as e:
+            logger.error(f"Error flushing perfdata to Splunk: {e}", exc_info=True)
+    
+    def flush(self):
+        """Force flush all pending data"""
+        self._flush_events()
+        self._flush_perfdata()
 
-    def _worker(self):
-        """Worker thread that batches and sends events"""
-        last_send = time.time()
-
-        while self.running:
-            try:
-                # Check if we should send based on size or time
-                queue_size = self.event_queue.qsize()
-                time_elapsed = time.time() - last_send
-
-                should_send = queue_size >= self.batch_size or (
-                    queue_size > 0 and time_elapsed >= self.batch_interval
-                )
-
-                if should_send:
-                    batch = self._get_batch(min(queue_size, self.batch_size))
-                    if batch:
-                        self._send_batch(batch)
-                        last_send = time.time()
-                else:
-                    time.sleep(0.1)  # Small sleep to prevent busy loop
-
-            except Exception as e:
-                self.logger.exception(f"Error in worker thread: {e}")
-                time.sleep(1)
-
-    def _get_batch(self, size: int) -> list:
-        """Get a batch of events from the queue"""
-        batch = []
-        for _ in range(size):
-            try:
-                event = self.event_queue.get_nowait()
-                batch.append(event)
-            except Empty:
-                break
-        return batch
-
-    def _send_batch(self, batch: list):
-        """Send a batch of events to Splunk HEC"""
-        if not batch:
-            return
-
-        # Convert batch to newline-delimited JSON
-        payload = "\n".join([json.dumps(event) for event in batch])
-
-        max_retries = 3
-        retry_delay = 1
-
-        for attempt in range(max_retries):
-            try:
-                response = self.session.post(
-                    self.config.splunk_hec_url,
-                    data=payload,
-                    verify=self.config.splunk_verify_ssl,
-                    timeout=10,
-                )
-
-                if response.status_code == 200:
-                    self.logger.debug(
-                        f"Successfully sent {len(batch)} events to Splunk"
-                    )
-                    return
-                else:
-                    self.logger.error(
-                        f"Splunk HEC returned status {response.status_code}: {response.text}"
-                    )
-
-            except requests.exceptions.RequestException as e:
-                self.logger.error(
-                    f"Failed to send to Splunk (attempt {attempt + 1}/{max_retries}): {e}"
-                )
-
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay)
-                retry_delay *= 2  # Exponential backoff
-
-        self.logger.error(
-            f"Failed to send {len(batch)} events after {max_retries} attempts"
-        )
