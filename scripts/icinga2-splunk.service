@@ -7,9 +7,13 @@ Wants=icinga2.service
 Type=simple
 User=nagios
 Group=nagios
-WorkingDirectory=/usr/local/bin/icinga2_splunk
+# Set working directory to the parent of the package directory so Python
+# can import the package as `icinga2_splunk` (e.g. /usr/local/bin/icinga2_splunk).
+WorkingDirectory=/usr/local/bin
 Environment="PYTHONUNBUFFERED=1"
-ExecStart=/usr/bin/python3 /usr/local/bin/icinga2_splunk/event_stream_client.py
+# Run the package as a module so imports like `from icinga2_splunk.config import ...`
+# resolve correctly without requiring the package to be installed system-wide.
+ExecStart=/usr/bin/python3 -m icinga2_splunk.event_stream_client
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -24,4 +28,3 @@ ReadWritePaths=/var/log/icinga2
 
 [Install]
 WantedBy=multi-user.target
-
