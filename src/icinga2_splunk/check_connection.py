@@ -34,7 +34,12 @@ def _icinga2_get(config: Config, path: str) -> requests.Response:
 def _fail_response(response: requests.Response) -> None:
     print(f"{FAIL} HTTP {response.status_code}")
     print(f"  Response: {response.text[:500]}")
-    if response.status_code == 401:  # noqa: PLR2004
+    if 300 <= response.status_code < 400:  # noqa: PLR2004
+        print(
+            f"  Hint: redirected to {response.headers.get('Location', '?')}; redirects are "
+            "not followed, so configure the final URL"
+        )
+    elif response.status_code == 401:  # noqa: PLR2004
         print("  Hint: check the API username/password or client certificate")
     elif response.status_code == 403:  # noqa: PLR2004
         print("  Hint: the API user lacks the required permissions")
@@ -121,7 +126,9 @@ def check_splunk_hec(config: Config) -> bool:
         body = None
     code = body.get("code") if isinstance(body, dict) else None
 
-    if response.ok or code == 5:  # noqa: PLR2004
+    accepted = 200 <= response.status_code < 300  # noqa: PLR2004
+    no_data = response.status_code == 400 and code == 5  # noqa: PLR2004
+    if accepted or no_data:
         print(f"{OK} Splunk HEC at {config.splunk_hec_url} accepted the token")
         return True
 

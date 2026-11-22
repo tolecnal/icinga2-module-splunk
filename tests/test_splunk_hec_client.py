@@ -703,3 +703,86 @@ def test_close_respects_deadline_and_spills_remainder(tmp_path: Path) -> None:
     client.close(timeout=5.0)
     assert fake.received == [1]
     assert spool.size_bytes > 0
+
+
+# ------------------------------------------------------- redirects & disk
+
+
+def test_redirect_is_not_a_delivery(caplog: pytest.LogCaptureFixture) -> None:
+    resp = response(301)
+    resp.headers = {"Location": "https://elsewhere/"}
+    fake = FakeSplunk(lambda _e: resp)
+    client, _ = make_client(fake)
+    client.send(1)
+    assert client.flush() is False
+    assert client.sent_count == 0
+    assert client.in_outage
+    assert client.pending == 1
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert errors and "redirect to 'https://elsewhere/'" in errors[0].getMessage()
+
+
+def test_discarded_event_content_only_at_debug(caplog: pytest.LogCaptureFixture) -> None:
+    client, _ = make_client(FakeSplunk(lambda _e: response(413)))
+    client.send("secret-output")
+    with caplog.at_level(logging.DEBUG):
+        client.flush()
+    error = next(r for r in caplog.records if r.levelno == logging.ERROR)
+    assert "secret-output" not in error.getMessage()
+    assert any(
+        "secret-output" in r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG
+    )
+
+
+def test_spool_close_error_is_logged(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    spool = make_spool(tmp_path)
+    client, _ = make_client(spool=spool)
+    with mock.patch.object(spool, "close", side_effect=OSError("EIO")):
+        client.close()
+    assert "Failed to close the disk spool" in caplog.text
+
+
+def test_enforce_limits_error_is_logged(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    spool = make_spool(tmp_path)
+    client, fake = make_client(spool=spool, clock=Clock())
+    client.send(1)
+    with mock.patch.object(spool, "enforce_limits", side_effect=OSError("EIO")):
+        client._cycle()
+    assert "Failed to apply disk spool limits" in caplog.text
+    assert fake.received == [1]
+
+
+def test_unreadable_spool_does_not_block_live_events(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    spool = make_spool(tmp_path)
+    spool.append([json.dumps({"event": "old"})])
+    client, fake = make_client(spool=spool)
+    client.send("live")
+    with mock.patch.object(spool, "oldest", side_effect=PermissionError("denied")):
+        assert client.flush() is True
+    assert fake.received == ["live"]
+    assert "Failed to read the disk spool" in caplog.text
+    assert client.flush() is True  # the backlog is picked up once readable
+    assert fake.received == ["live", "old"]
+
+
+def test_segment_dropped_mid_replay_is_not_resent(tmp_path: Path) -> None:
+    spool = make_spool(tmp_path)
+    spool.append([json.dumps({"event": i}) for i in range(4)])
+    calls = {"n": 0}
+
+    def handler(_events: list[dict[str, Any]]) -> Any:
+        calls["n"] += 1
+        return response(200, OK) if calls["n"] == 1 else requests.ConnectionError("down")
+
+    fake = FakeSplunk(handler)
+    client, _ = make_client(fake, spool=spool, batch_size=2)
+    assert client.flush() is False  # 2 delivered, then Splunk goes away
+    assert client._replay is not None
+    path = client._replay[0]
+    spool._drop(path, "test")  # the age/size limit removes the segment meanwhile
+    assert spool.dropped_count == 2  # only the undelivered half
+    fake.handler = lambda _e: response(200, OK)
+    assert client.flush() is True
+    assert fake.received == [0, 1]

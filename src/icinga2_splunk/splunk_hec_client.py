@@ -5,16 +5,17 @@ Delivery model
 Events are queued in memory by :meth:`SplunkHECClient.send` and delivered by a
 single worker thread in batches. Each HEC response is classified:
 
-* **Success** - the batch is done.
-* **Bad data** (HTTP 400 for a specific event, or 413 payload too large) -
+* **Success** (2xx only) - the batch is done.
+* **Bad data** (HTTP 400 with a known bad-event code, or 413 too large) -
   retrying the same request can never succeed. If HEC reports which event was
   invalid, the events before it were indexed, that event is discarded and the
   rest is resent. Otherwise the batch is split in half until the offending
   event is isolated and discarded. Other events are not lost.
 * **Splunk unavailable** - connection errors, timeouts, HTTP 5xx/429, and also
-  401/403/404 and "incorrect index" (configuration problems that an admin can
-  fix). The client enters *outage* mode: nothing is discarded, delivery is
-  retried with exponential backoff (``retry_initial`` .. ``retry_max``), and
+  3xx (redirects are not followed), 401/403/404, and any other 400 such as
+  "incorrect index" (configuration problems that an admin can fix). The client
+  enters *outage* mode: nothing is discarded, delivery is retried with
+  exponential backoff (``retry_initial`` .. ``retry_max``), and
   pending events are written to the optional :class:`DiskSpool` so they
   survive long outages and restarts.
 
@@ -43,6 +44,8 @@ logger = logging.getLogger(__name__)
 
 # HEC error codes in a 400 response that mean "this event is malformed".
 _BAD_EVENT_CODES = frozenset({6, 12, 13, 15, 16, 17, 18, 19, 20, 21})
+_HTTP_OK_MIN, _HTTP_OK_MAX = 200, 300
+_HTTP_REDIRECT_MIN, _HTTP_REDIRECT_MAX = 300, 400
 _HTTP_BAD_REQUEST = 400
 _HTTP_TOO_LARGE = 413
 
@@ -140,7 +143,10 @@ class SplunkHECClient:
             self._deliver_memory(stop_on_close=False, deadline=deadline)
         if self.spool is not None:
             self._spill_memory()
-            self.spool.close()
+            try:
+                self.spool.close()
+            except OSError as exc:
+                logger.error("Failed to close the disk spool cleanly: %s", exc)  # noqa: TRY400
             if self.spool:
                 logger.info(
                     "%.1f MB of events remain spooled for delivery on next start",
@@ -259,7 +265,10 @@ class SplunkHECClient:
         now = self._clock()
         if self.spool is not None and now - self._last_limits_check >= ENFORCE_LIMITS_INTERVAL:
             self._last_limits_check = now
-            self.spool.enforce_limits()
+            try:
+                self.spool.enforce_limits()
+            except OSError as exc:
+                logger.error("Failed to apply disk spool limits: %s", exc)  # noqa: TRY400
 
         if self.in_outage and now < self._next_attempt:
             self._spill_memory()
@@ -283,12 +292,22 @@ class SplunkHECClient:
         assert self.spool is not None  # noqa: S101 - for type narrowing
         while not (stop_on_close and self._closed.is_set()):
             if self._replay is None:
-                oldest = self.spool.oldest()
+                try:
+                    oldest = self.spool.oldest()
+                except OSError as exc:
+                    # Don't block live events on an unreadable spool; the
+                    # backlog is retried on the next cycle.
+                    logger.error("Failed to read the disk spool: %s", exc)  # noqa: TRY400
+                    return True
                 if oldest is None:
                     return True
                 self._replay = (oldest[0], oldest[1], 0)
 
             path, lines, done = self._replay
+            if path not in self.spool:
+                # Dropped by the spool's age or size limit during the replay.
+                self._replay = None
+                continue
             if done >= len(lines):
                 self.spool.remove(path)
                 self._replay = None
@@ -297,6 +316,7 @@ class SplunkHECClient:
             batch = lines[done : done + self.batch_size]
             delivered = self._deliver(batch)
             self._replay = (path, lines, done + delivered)
+            self.spool.mark_progress(path, done + delivered)
             if delivered < len(batch):
                 self._enter_outage()
                 return False
@@ -347,7 +367,7 @@ class SplunkHECClient:
                 self._log_failure(len(chunk), str(exc))
                 return resolved
 
-            if response.ok:
+            if _HTTP_OK_MIN <= response.status_code < _HTTP_OK_MAX:
                 self.sent_count += len(chunk)
                 logger.debug("Sent %d events to Splunk", len(chunk))
                 return resolved + len(chunk)
@@ -366,9 +386,16 @@ class SplunkHECClient:
             if response.status_code == _HTTP_TOO_LARGE:
                 return resolved + self._bisect(chunk, response)
 
-            self._log_failure(
-                len(chunk), f"HTTP {response.status_code} - {response.text[:300]}", response
-            )
+            if _HTTP_REDIRECT_MIN <= response.status_code < _HTTP_REDIRECT_MAX:
+                # Redirects are not followed (they could leak the token); a
+                # 3xx is never a delivery.
+                reason = (
+                    f"HTTP {response.status_code} redirect to "
+                    f"{response.headers.get('Location', '?')!r}; check splunk_hec_url"
+                )
+            else:
+                reason = f"HTTP {response.status_code} - {response.text[:300]}"
+            self._log_failure(len(chunk), reason, response)
             return resolved
         return resolved
 
@@ -386,17 +413,21 @@ class SplunkHECClient:
         with self._cond:
             self.dropped_count += 1
         logger.error(
-            "Splunk rejected an event as invalid and it was discarded: HTTP %s - %s; event: %.300s",
+            "Splunk rejected an event as invalid and it was discarded: HTTP %s - %s",
             response.status_code,
             response.text[:300],
-            line,
         )
+        # The event may contain check output; only show it when debugging.
+        logger.debug("Discarded event: %.300s", line)
 
     def _log_failure(
         self, count: int, reason: str, response: requests.Response | None = None
     ) -> None:
         level = logging.WARNING
-        if response is not None and response.status_code in (400, 401, 403, 404):
+        if response is not None and (
+            _HTTP_REDIRECT_MIN <= response.status_code < _HTTP_REDIRECT_MAX
+            or response.status_code in (400, 401, 403, 404)
+        ):
             level = logging.ERROR  # configuration problem; needs an admin
         if not self.in_outage or level == logging.ERROR:
             logger.log(level, "Could not deliver %d events to Splunk: %s", count, reason)

@@ -126,3 +126,17 @@ def test_event_stream_ends_without_event(make_config, capsys) -> None:
     with mock.patch.object(cc.requests, "post", return_value=response(200, lines=[])):
         assert cc.check_event_stream(make_config()) is True
     assert "Received an event" not in capsys.readouterr().out
+
+
+def test_splunk_hec_redirect_is_rejected(make_config, capsys) -> None:
+    resp = response(302)
+    resp.headers = {"Location": "https://elsewhere:8088/"}
+    with mock.patch.object(cc.requests, "post", return_value=resp):
+        assert cc.check_splunk_hec(make_config()) is False
+    out = capsys.readouterr().out
+    assert "redirected to https://elsewhere:8088/" in out
+
+
+def test_splunk_hec_code_5_requires_status_400(make_config) -> None:
+    with mock.patch.object(cc.requests, "post", return_value=response(500, {"code": 5})):
+        assert cc.check_splunk_hec(make_config()) is False

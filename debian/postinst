@@ -6,8 +6,14 @@ CONFIG=/etc/icinga2-splunk/splunk_config.json
 
 if [ "$1" = configure ]; then
     if ! getent passwd "$USER" >/dev/null; then
+        # adduser >= 3.130 has --comment; newer versions deprecate --gecos.
+        if adduser --help 2>&1 | grep -q -- --comment; then
+            COMMENT_OPT=--comment
+        else
+            COMMENT_OPT=--gecos
+        fi
         adduser --system --group --quiet --no-create-home \
-            --home /var/lib/icinga2-splunk --gecos "Icinga2 to Splunk forwarder" "$USER"
+            --home /var/lib/icinga2-splunk "$COMMENT_OPT" "Icinga2 to Splunk forwarder" "$USER"
     fi
 
     # The config holds credentials: readable by root and the service only.

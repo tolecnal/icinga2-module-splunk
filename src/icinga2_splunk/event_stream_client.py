@@ -20,6 +20,7 @@ from types import FrameType
 from typing import Any
 
 import requests
+from urllib3.exceptions import ReadTimeoutError
 
 from icinga2_splunk import __version__
 from icinga2_splunk.config import Config, ConfigError
@@ -94,6 +95,13 @@ def _iter_bounded_lines(
         yield bytes(buf).rstrip(b"\r")
 
 
+def _is_read_timeout(exc: requests.RequestException) -> bool:
+    """Whether ``exc`` is a read timeout (requests wraps those raised mid-stream)."""
+    if isinstance(exc, requests.ReadTimeout):
+        return True
+    return bool(exc.args) and isinstance(exc.args[0], ReadTimeoutError)
+
+
 def _object_name(host: str | None, service: str | None) -> str | None:
     return f"{host}!{service}" if service else host
 
@@ -163,6 +171,8 @@ class EventStreamClient:
         self.splunk = splunk or build_splunk_client(config)
         self._session_factory = session_factory
         self._stop = threading.Event()
+        # Set when the last connection ended because the stream was idle.
+        self._idle_timeout = False
         self._handlers: dict[str, Callable[[Event], None]] = {
             "CheckResult": self._handle_check_result,
             "StateChange": self._handle_state_change,
@@ -190,6 +200,11 @@ class EventStreamClient:
             connected = self._consume()
             if self._stop.is_set():
                 break
+            if self._idle_timeout:
+                # A quiet stream is normal; reconnect straight away so as few
+                # events as possible are missed while resubscribing.
+                delay, attempt = RECONNECT_DELAY_MIN, 0
+                continue
             if connected:
                 delay, attempt = RECONNECT_DELAY_MIN, 0
             attempt += 1
@@ -229,6 +244,7 @@ class EventStreamClient:
         Returns:
             True if the connection was established (so backoff can be reset).
         """
+        self._idle_timeout = False
         url = f"{self.config.icinga2_api_url}/v1/events"
         payload = self.subscription()
         logger.info("Connecting to %s (types: %s)", url, ", ".join(payload["types"]))
@@ -268,8 +284,14 @@ class EventStreamClient:
                     else:
                         logger.warning("Event stream closed by Icinga2")
             except requests.RequestException as exc:
-                # Includes the read timeout used as heartbeat.
-                logger.error("Event stream connection error: %s", exc)  # noqa: TRY400
+                if connected and _is_read_timeout(exc):
+                    self._idle_timeout = True
+                    logger.info(
+                        "No data from Icinga2 for %g s (heartbeat_timeout); reconnecting",
+                        self.config.heartbeat_timeout,
+                    )
+                else:
+                    logger.error("Event stream connection error: %s", exc)  # noqa: TRY400
         return connected
 
     def _process_line(self, line: bytes) -> None:

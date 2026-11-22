@@ -20,7 +20,6 @@ import os
 import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import IO
 
 logger = logging.getLogger(__name__)
 
@@ -69,10 +68,14 @@ class DiskSpool:
             else:
                 path.unlink(missing_ok=True)
 
-        self._current: IO[bytes] | None = None
+        # File descriptor of the current segment. Writes go straight to the fd
+        # (no userspace buffer) so a failed write can be rolled back exactly.
+        self._current: int | None = None
         self._current_path: Path | None = None
         self._current_bytes = 0
         self._seq = 0
+        # Lines already delivered from a segment that is being replayed.
+        self._progress: dict[Path, int] = {}
         self.dropped_count = 0
 
         if self._segments:
@@ -96,7 +99,13 @@ class DiskSpool:
     # --------------------------------------------------------------- writing
 
     def append(self, lines: Iterable[str]) -> None:
-        """Append serialized events to the spool, enforcing the size limit."""
+        """Append serialized events to the spool, enforcing the size limit.
+
+        The append is all-or-nothing: if the write fails (e.g. disk full), the
+        partial data is truncated away, the segment is closed and the error is
+        re-raised, so the caller can keep the events elsewhere without
+        creating duplicates.
+        """
         data = b"".join(line.encode("utf-8") + b"\n" for line in lines)
         if not data:
             return
@@ -104,8 +113,11 @@ class DiskSpool:
             self._roll()
             self._open_segment()
         assert self._current is not None  # noqa: S101 - for type narrowing
-        self._current.write(data)
-        self._current.flush()
+        try:
+            _write_all(self._current, data)
+        except OSError:
+            self._abandon_current()
+            raise
         self._current_bytes += len(data)
         self._enforce_size()
 
@@ -113,23 +125,38 @@ class DiskSpool:
         self._seq += 1
         name = f"{time.time_ns():020d}-{os.getpid()}-{self._seq:06d}{SEGMENT_SUFFIX}"
         path = self.directory / name
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_APPEND, 0o600)
-        self._current = os.fdopen(fd, "ab")
+        self._current = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_APPEND, 0o600)
         self._current_path = path
         self._current_bytes = 0
+
+    def _abandon_current(self) -> None:
+        """Undo a failed write and close the current segment."""
+        assert self._current is not None and self._current_path is not None  # noqa: S101
+        fd, path, size = self._current, self._current_path, self._current_bytes
+        self._current, self._current_path, self._current_bytes = None, None, 0
+        try:
+            os.ftruncate(fd, size)
+        except OSError as exc:
+            logger.warning("Could not truncate spool segment %s: %s", path.name, exc)
+        finally:
+            os.close(fd)
+        if size:
+            self._segments[path] = size
+        else:
+            path.unlink(missing_ok=True)
 
     def _roll(self) -> None:
         """Close the current segment and make it available for replay."""
         if self._current is None or self._current_path is None:
             return
-        self._current.flush()
-        os.fsync(self._current.fileno())
-        self._current.close()
-        # append() never leaves an empty segment behind, so this is never 0.
-        self._segments[self._current_path] = self._current_bytes
-        self._current = None
-        self._current_path = None
-        self._current_bytes = 0
+        fd, path, size = self._current, self._current_path, self._current_bytes
+        self._current, self._current_path, self._current_bytes = None, None, 0
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+            # append() never leaves an empty segment behind, so size is never 0.
+            self._segments[path] = size
 
     def close(self) -> None:
         """Flush and close the current segment."""
@@ -154,10 +181,30 @@ class DiskSpool:
             return path, _valid_lines(raw, path)
         return None
 
+    def __contains__(self, path: object) -> bool:
+        """Whether ``path`` is still a spooled segment (not removed or dropped)."""
+        return path in self._segments
+
+    def mark_progress(self, path: Path, delivered: int) -> None:
+        """Record how many lines of a segment have been delivered.
+
+        Used so a segment dropped by the limits mid-replay is counted correctly.
+        """
+        if path in self._segments:
+            self._progress[path] = delivered
+
     def remove(self, path: Path) -> None:
-        """Delete a segment after it has been delivered."""
+        """Delete a segment after it has been delivered.
+
+        The segment is forgotten even if deleting the file fails, so it is not
+        replayed again by this process (it would be after a restart).
+        """
         self._segments.pop(path, None)
-        path.unlink(missing_ok=True)
+        self._progress.pop(path, None)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.error("Could not delete delivered spool segment %s: %s", path.name, exc)  # noqa: TRY400
 
     # ---------------------------------------------------------------- limits
 
@@ -192,8 +239,9 @@ class DiskSpool:
     def _drop(self, path: Path, reason: str) -> None:
         try:
             count = path.read_bytes().count(b"\n")
-        except FileNotFoundError:
+        except OSError:
             count = 0
+        count = max(0, count - self._progress.get(path, 0))
         self.remove(path)
         self.dropped_count += count
         logger.error("Discarded %d spooled events (%s): %s", count, reason, path.name)
@@ -219,3 +267,11 @@ def _valid_lines(raw: bytes, path: Path) -> list[str]:
     if bad:
         logger.warning("Skipped %d corrupt line(s) in spool segment %s", bad, path.name)
     return lines
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    """Write all of ``data`` to ``fd``, handling short writes."""
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        view = view[written:]

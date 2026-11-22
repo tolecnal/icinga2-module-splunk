@@ -542,3 +542,58 @@ def test_close_logs_spool_dropped_count(make_config, splunk, caplog) -> None:
     with caplog.at_level("INFO"):
         client.close()
     assert "7 dropped" in caplog.text
+
+
+# ------------------------------------------------------------- idle stream
+
+
+def test_is_read_timeout() -> None:
+    from urllib3.exceptions import ReadTimeoutError
+
+    assert esc._is_read_timeout(requests.ReadTimeout("x"))
+    assert esc._is_read_timeout(
+        requests.ConnectionError(ReadTimeoutError(None, None, "Read timed out."))  # type: ignore[arg-type]
+    )
+    assert not esc._is_read_timeout(requests.ConnectionError("refused"))
+    assert not esc._is_read_timeout(requests.ConnectionError())
+
+
+def test_idle_stream_reconnects_quietly(make_config, splunk, caplog) -> None:
+    from urllib3.exceptions import ReadTimeoutError
+
+    timeout = requests.ConnectionError(ReadTimeoutError(None, None, "Read timed out."))  # type: ignore[arg-type]
+    client, _ = make_stream_client(make_config, splunk, FakeResponse(200, timeout))
+    with caplog.at_level("INFO"):
+        assert client._consume() is True
+    assert client._idle_timeout
+    assert "No data from Icinga2 for 300 s" in caplog.text
+    assert not any(r.levelname == "ERROR" for r in caplog.records)
+
+
+def test_read_timeout_before_connect_is_an_error(make_config, splunk, caplog) -> None:
+    client, _ = make_stream_client(make_config, splunk, requests.ReadTimeout("slow"))
+    assert client._consume() is False
+    assert not client._idle_timeout
+    assert "Event stream connection error" in caplog.text
+
+
+def test_run_reconnects_immediately_after_idle_timeout(make_config, splunk, caplog) -> None:
+    client = EventStreamClient(make_config(), splunk=splunk)
+    calls = {"n": 0}
+
+    def consume() -> bool:
+        calls["n"] += 1
+        client._idle_timeout = calls["n"] == 1
+        if calls["n"] == 2:
+            client.stop()
+        return True
+
+    waits: list[float] = []
+    with (
+        mock.patch.object(client, "_consume", side_effect=consume),
+        mock.patch.object(client._stop, "wait", side_effect=waits.append),
+    ):
+        client.run()
+    assert calls["n"] == 2
+    assert waits == []
+    assert "disconnected" not in caplog.text
