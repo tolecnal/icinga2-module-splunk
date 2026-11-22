@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+import pwd
 import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, fields
@@ -341,6 +342,41 @@ class Config:
         if self.icinga2_api_client_cert and self.icinga2_api_client_key:
             return (self.icinga2_api_client_cert, self.icinga2_api_client_key)
         return None
+
+    def file_errors(self) -> list[str]:
+        """Check that configured certificate files are readable by this process.
+
+        Not part of validation on construction because it depends on the user
+        and host the configuration is used on; call it before connecting.
+        """
+        paths = [
+            ("icinga2_api_verify_ssl", self.icinga2_api_verify_ssl),
+            ("splunk_verify_ssl", self.splunk_verify_ssl),
+            ("icinga2_api_client_cert", self.icinga2_api_client_cert),
+            ("icinga2_api_client_key", self.icinga2_api_client_key),
+        ]
+        errors = []
+        for name, value in paths:
+            if not isinstance(value, str) or not value:
+                continue
+            # os.path.isfile, unlike Path.is_file on Python < 3.12, returns False
+            # instead of raising when a parent directory is not searchable.
+            if not os.path.isfile(value) or not os.access(value, os.R_OK):  # noqa: PTH113
+                message = f"{name}: {value!r} is not a file readable by user {_current_user()}"
+                if value.startswith("/var/lib/icinga2/"):
+                    message += (
+                        " (Icinga2 keeps its certificates private; copy the file to e.g. "
+                        "/etc/icinga2-splunk/ and point the setting there)"
+                    )
+                errors.append(message)
+        return errors
+
+
+def _current_user() -> str:
+    try:
+        return pwd.getpwuid(os.geteuid()).pw_name
+    except KeyError:
+        return f"uid {os.geteuid()}"
 
 
 def _read_config_file(path: Path) -> dict[str, Any]:

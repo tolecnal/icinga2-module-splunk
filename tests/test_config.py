@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -231,3 +232,55 @@ def test_boolean_env_true(tmp_path: Path, base_settings: dict[str, Any]) -> None
     path = write_config(tmp_path, base_settings)
     config = Config.load(path, environ={"INCLUDE_CHECK_RESULTS": "Yes"})
     assert config.include_check_results is True
+
+
+# ------------------------------------------------------------ file checks
+
+
+def test_file_errors_ok_for_readable_files_and_booleans(make_config, tmp_path: Path) -> None:
+    ca = tmp_path / "ca.crt"
+    ca.write_text("x")
+    config = make_config(icinga2_api_verify_ssl=str(ca), splunk_verify_ssl=True)
+    assert config.file_errors() == []
+
+
+def test_file_errors_reports_missing_files(make_config, tmp_path: Path) -> None:
+    config = make_config(
+        icinga2_api_client_cert=str(tmp_path / "c.pem"),
+        icinga2_api_client_key=str(tmp_path / "k.pem"),
+        splunk_verify_ssl=str(tmp_path),  # a directory is not a CA bundle
+    )
+    errors = config.file_errors()
+    assert len(errors) == 3
+    assert all("is not a file readable by user" in e for e in errors)
+
+
+def test_file_errors_hint_for_icinga2_private_certs(make_config) -> None:
+    config = make_config(icinga2_api_verify_ssl="/var/lib/icinga2/certs/does-not-exist.crt")
+    [error] = config.file_errors()
+    assert "copy the file to e.g. /etc/icinga2-splunk/" in error
+
+
+def test_file_errors_unsearchable_directory(make_config, tmp_path: Path) -> None:
+    private = tmp_path / "certs"
+    private.mkdir()
+    (private / "ca.crt").write_text("x")
+    private.chmod(0o000)
+    try:
+        if os.access(private / "ca.crt", os.R_OK):  # running as root
+            pytest.skip("cannot test permissions as root")
+        config = make_config(icinga2_api_verify_ssl=str(private / "ca.crt"))
+        assert len(config.file_errors()) == 1
+    finally:
+        private.chmod(0o700)
+
+
+def test_current_user_without_passwd_entry(make_config, monkeypatch) -> None:
+    import icinga2_splunk.config as config_module
+
+    def missing(_uid: int) -> Any:
+        raise KeyError(_uid)
+
+    monkeypatch.setattr(config_module.pwd, "getpwuid", missing)
+    config = make_config(splunk_verify_ssl="/nonexistent/ca.crt")
+    assert f"uid {os.geteuid()}" in config.file_errors()[0]

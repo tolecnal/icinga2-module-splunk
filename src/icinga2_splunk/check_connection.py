@@ -13,7 +13,10 @@ from collections.abc import Callable
 import requests
 
 from icinga2_splunk.config import Config, ConfigError
-from icinga2_splunk.event_stream_client import subscription_payload
+from icinga2_splunk.event_stream_client import (
+    silence_insecure_request_warnings,
+    subscription_payload,
+)
 
 TIMEOUT = 10.0
 OK, FAIL, INFO = "✓", "✗", "i"
@@ -157,6 +160,12 @@ def main(argv: list[str] | None = None) -> int:
         config = Config.load(args.config)
     except ConfigError as exc:
         print(f"{FAIL} Configuration error: {exc}")
+        return 1
+    silence_insecure_request_warnings(config)
+    file_errors = config.file_errors()
+    for error in file_errors:
+        print(f"{FAIL} {error}")
+    if file_errors:
         return 1
     print(f"{OK} Configuration loaded")
 

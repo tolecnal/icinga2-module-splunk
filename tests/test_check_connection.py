@@ -140,3 +140,11 @@ def test_splunk_hec_redirect_is_rejected(make_config, capsys) -> None:
 def test_splunk_hec_code_5_requires_status_400(make_config) -> None:
     with mock.patch.object(cc.requests, "post", return_value=response(500, {"code": 5})):
         assert cc.check_splunk_hec(make_config()) is False
+
+
+def test_main_unreadable_ca(tmp_path, base_settings, capsys) -> None:
+    path = tmp_path / "c.json"
+    path.write_text(json.dumps({**base_settings, "splunk_verify_ssl": str(tmp_path / "no.crt")}))
+    path.chmod(0o600)
+    assert cc.main(["-c", str(path)]) == 1
+    assert "is not a file readable by user" in capsys.readouterr().out

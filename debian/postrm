@@ -4,6 +4,9 @@ set -e
 if [ "$1" = purge ]; then
     # Undelivered events in the disk spool.
     rm -rf /var/lib/icinga2-splunk
+    # Copy of the Icinga2 CA certificate made by postinst.
+    rm -f /etc/icinga2-splunk/icinga2-ca.crt
+    rmdir --ignore-fail-on-non-empty /etc/icinga2-splunk 2>/dev/null || true
 fi
 
 #DEBHELPER#
