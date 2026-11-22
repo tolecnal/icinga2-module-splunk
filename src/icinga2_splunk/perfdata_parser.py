@@ -106,12 +106,17 @@ def _from_mapping(item: Mapping[str, Any]) -> Metric | None:
     """Convert a serialized Icinga2 ``PerfdataValue`` dictionary to a metric."""
     label = item.get("label")
     value = item.get("value")
-    if not label or isinstance(value, bool) or not isinstance(value, (int, float)):
+    if (
+        not label
+        or isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+    ):
         return None
 
     def number(key: str) -> float | None:
         raw = item.get(key)
-        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw):
             return None
         return float(raw)
 

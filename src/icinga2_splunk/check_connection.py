@@ -13,6 +13,7 @@ from collections.abc import Callable
 import requests
 
 from icinga2_splunk.config import Config, ConfigError
+from icinga2_splunk.event_stream_client import subscription_payload
 
 TIMEOUT = 10.0
 OK, FAIL, INFO = "✓", "✗", "i"
@@ -25,6 +26,7 @@ def _icinga2_get(config: Config, path: str) -> requests.Response:
         cert=config.icinga2_cert,
         verify=config.icinga2_api_verify_ssl,
         headers={"Accept": "application/json"},
+        allow_redirects=False,
         timeout=TIMEOUT,
     )
 
@@ -32,7 +34,12 @@ def _icinga2_get(config: Config, path: str) -> requests.Response:
 def _fail_response(response: requests.Response) -> None:
     print(f"{FAIL} HTTP {response.status_code}")
     print(f"  Response: {response.text[:500]}")
-    if response.status_code == 401:  # noqa: PLR2004
+    if 300 <= response.status_code < 400:  # noqa: PLR2004
+        print(
+            f"  Hint: redirected to {response.headers.get('Location', '?')}; redirects are "
+            "not followed, so configure the final URL"
+        )
+    elif response.status_code == 401:  # noqa: PLR2004
         print("  Hint: check the API username/password or client certificate")
     elif response.status_code == 403:  # noqa: PLR2004
         print("  Hint: the API user lacks the required permissions")
@@ -63,7 +70,7 @@ def check_icinga2_api(config: Config) -> bool:
 def check_event_stream(config: Config) -> bool:
     """Check that the API user may subscribe to the configured event types."""
     print("\n=== Icinga2 event stream ===")
-    payload = {"queue": "icinga2-splunk-check", "types": ["CheckResult"]}
+    payload = subscription_payload(config, queue="icinga2-splunk-check")
     try:
         with requests.post(
             f"{config.icinga2_api_url}/v1/events",
@@ -72,6 +79,7 @@ def check_event_stream(config: Config) -> bool:
             cert=config.icinga2_cert,
             verify=config.icinga2_api_verify_ssl,
             headers={"Accept": "application/json"},
+            allow_redirects=False,
             timeout=TIMEOUT,
             stream=True,
         ) as response:
@@ -93,7 +101,7 @@ def check_event_stream(config: Config) -> bool:
 
 
 def check_splunk_hec(config: Config) -> bool:
-    """Check that Splunk HEC accepts the token (uses the HEC health endpoint)."""
+    """Check that Splunk HEC accepts the token (sends an empty POST to the event endpoint)."""
     print("\n=== Splunk HEC ===")
     headers = {"Authorization": f"Splunk {config.splunk_hec_token}"}
     url = f"{config.splunk_hec_url}/services/collector/event"
@@ -101,18 +109,26 @@ def check_splunk_hec(config: Config) -> bool:
         # An empty POST is rejected with "No data" (HTTP 400, code 5) when the
         # token is valid, without indexing anything.
         response = requests.post(
-            url, headers=headers, data=b"", verify=config.splunk_verify_ssl, timeout=TIMEOUT
+            url,
+            headers=headers,
+            data=b"",
+            verify=config.splunk_verify_ssl,
+            allow_redirects=False,
+            timeout=TIMEOUT,
         )
     except requests.RequestException as exc:
         print(f"{FAIL} Connection error: {exc}")
         return False
 
     try:
-        code = response.json().get("code")
+        body = response.json()
     except ValueError:
-        code = None
+        body = None
+    code = body.get("code") if isinstance(body, dict) else None
 
-    if response.ok or code == 5:  # noqa: PLR2004
+    accepted = 200 <= response.status_code < 300  # noqa: PLR2004
+    no_data = response.status_code == 400 and code == 5  # noqa: PLR2004
+    if accepted or no_data:
         print(f"{OK} Splunk HEC at {config.splunk_hec_url} accepted the token")
         return True
 

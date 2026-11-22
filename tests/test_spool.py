@@ -6,6 +6,7 @@ import stat
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
 
@@ -191,15 +192,16 @@ def test_unwritable_directory(tmp_path: Path) -> None:
         DiskSpool(directory, max_bytes=100, max_age=10)
 
 
-def test_age_limit_stops_at_first_fresh_segment(make: Any, clock: Clock, tmp_path: Path) -> None:
+def test_age_limit_handles_out_of_order_mtimes(make: Any, clock: Clock, tmp_path: Path) -> None:
     spool = make(max_age=100, segment_max_bytes=1)
-    for name in ("old", "fresh", "current"):
+    for name in ("fresh", "old", "current"):
         spool.append(lines(name))
-    old, fresh, _current = segments(tmp_path)
-    os.utime(old, (clock.now - 200, clock.now - 200))
+    fresh, old, _current = segments(tmp_path)
     os.utime(fresh, (clock.now - 10, clock.now - 10))
+    os.utime(old, (clock.now - 200, clock.now - 200))
     spool.enforce_limits()
-    assert [p.exists() for p in (old, fresh)] == [False, True]
+    assert [p.exists() for p in (fresh, old)] == [True, False]
+    assert spool.dropped_count == 1
 
 
 def test_current_segment_deleted_externally(make: Any, tmp_path: Path) -> None:
@@ -217,3 +219,78 @@ def test_drop_of_externally_deleted_segment(make: Any, tmp_path: Path) -> None:
     for i in range(10):
         spool.append(lines(i))
     assert spool.size_bytes <= 120
+
+
+# ------------------------------------------------------------ write errors
+
+
+def test_failed_write_is_rolled_back(make: Any, tmp_path: Path) -> None:
+    spool = make()
+    spool.append(lines(1))
+    real_write = os.write
+    calls = {"n": 0}
+
+    def flaky_write(fd: int, data: Any) -> int:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real_write(fd, bytes(data[:3]))  # short write, then the disk fills
+        raise OSError(28, "No space left on device")
+
+    with (
+        mock.patch("icinga2_splunk.spool.os.write", side_effect=flaky_write),
+        pytest.raises(OSError, match="No space"),
+    ):
+        spool.append(lines(2))
+    # The partial write was truncated away and the segment closed.
+    [segment] = segments(tmp_path)
+    assert events(spool.oldest()[1]) == [1]
+    assert segment.stat().st_size == spool.size_bytes
+    # The next append starts a fresh segment.
+    spool.append(lines(3))
+    assert len(segments(tmp_path)) == 2
+
+
+def test_failed_first_write_leaves_no_empty_segment(make: Any, tmp_path: Path) -> None:
+    spool = make()
+    with (
+        mock.patch("icinga2_splunk.spool.os.write", side_effect=OSError(28, "full")),
+        pytest.raises(OSError),
+    ):
+        spool.append(lines(1))
+    assert segments(tmp_path) == []
+    assert not spool
+
+
+def test_failed_truncate_is_logged(make: Any, caplog: Any) -> None:
+    spool = make()
+    spool.append(lines(1))
+    with (
+        mock.patch("icinga2_splunk.spool.os.write", side_effect=OSError(5, "EIO")),
+        mock.patch("icinga2_splunk.spool.os.ftruncate", side_effect=OSError(5, "EIO")),
+        pytest.raises(OSError),
+    ):
+        spool.append(lines(2))
+    assert "Could not truncate" in caplog.text
+
+
+def test_remove_failure_forgets_segment(make: Any, tmp_path: Path, caplog: Any) -> None:
+    spool = make()
+    spool.append(lines(1))
+    path, _ = spool.oldest()
+    with mock.patch.object(Path, "unlink", side_effect=PermissionError("read-only")):
+        spool.remove(path)
+    assert path not in spool
+    assert spool.oldest() is None
+    assert "Could not delete" in caplog.text
+
+
+def test_drop_counts_only_undelivered_lines(make: Any, tmp_path: Path, clock: Clock) -> None:
+    spool = make(max_age=100)
+    spool.append(lines(1, 2, 3, 4))
+    path, _ = spool.oldest()
+    spool.mark_progress(path, 3)
+    spool.mark_progress(tmp_path / "unknown.jsonl", 1)  # ignored
+    os.utime(path, (clock.now - 200, clock.now - 200))
+    spool.enforce_limits()
+    assert path not in spool
+    assert spool.dropped_count == 1

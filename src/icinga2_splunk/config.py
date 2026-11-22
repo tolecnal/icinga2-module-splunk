@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import stat
 from collections.abc import Callable, Mapping
@@ -231,6 +232,8 @@ class Config:
             parts = urlsplit(getattr(self, name))
             if parts.scheme not in ("http", "https") or not parts.netloc:
                 errors.append(f"{name} must be an http(s) URL")
+            elif parts.username is not None or parts.password is not None:
+                errors.append(f"{name} must not contain embedded credentials")
 
         if self.icinga2_auth is None and self.icinga2_cert is None:
             errors.append(
@@ -239,11 +242,10 @@ class Config:
                 "icinga2_api_client_cert/icinga2_api_client_key"
             )
 
-        errors.extend(
-            f"{name} must be a boolean or a CA bundle path"
-            for name in ("icinga2_api_verify_ssl", "splunk_verify_ssl")
-            if not isinstance(getattr(self, name), (bool, str))
-        )
+        for name in ("icinga2_api_verify_ssl", "splunk_verify_ssl"):
+            val = getattr(self, name)
+            if not isinstance(val, (bool, str)) or (isinstance(val, str) and not val.strip()):
+                errors.append(f"{name} must be a boolean or a CA bundle path")
         return errors
 
     def _option_errors(self) -> list[str]:
@@ -251,7 +253,11 @@ class Config:
             return isinstance(value, int) and not isinstance(value, bool)
 
         def is_number(value: object) -> bool:
-            return isinstance(value, (int, float)) and not isinstance(value, bool)
+            return (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+            )
 
         checks: list[tuple[bool, str]] = [
             (
@@ -343,15 +349,15 @@ def _read_config_file(path: Path) -> dict[str, Any]:
         return {}
 
     try:
-        mode = path.stat().st_mode
-        if mode & stat.S_IROTH:
-            logger.warning(
-                "Config file %s is world-readable and may contain secrets; "
-                "consider 'chmod 0640 %s'",
-                path,
-                path,
-            )
         with path.open(encoding="utf-8") as fh:
+            mode = os.fstat(fh.fileno()).st_mode
+            if mode & (stat.S_IROTH | stat.S_IWOTH):
+                logger.warning(
+                    "Config file %s is world-readable/writable and may contain secrets; "
+                    "consider 'chmod 0640 %s'",
+                    path,
+                    path,
+                )
             data = json.load(fh)
     except (OSError, json.JSONDecodeError) as exc:
         raise ConfigError(f"Failed to load config from {path}: {exc}") from exc

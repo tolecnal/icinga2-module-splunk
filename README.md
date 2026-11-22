@@ -9,7 +9,9 @@ and the Splunk HTTP Event Collector (HEC).
 - **Real-time streaming** from the Icinga2 `/v1/events` API: no per-check processes.
 - **Event types**: StateChange, Notification, Acknowledgement set/cleared, Comment
   added/removed, Downtime added/removed/started/triggered, and optionally raw
-  CheckResults. Any other subscribed type (e.g. `ObjectCreated`) is forwarded as is.
+  CheckResults. Any other subscribed type (e.g. `ObjectCreated`) is forwarded as is
+  (note: generic events are not filtered, so avoid subscribing to object-change types
+  if your Icinga2 objects contain secrets in custom variables).
 - **Performance data**: each metric becomes its own event, with thresholds, in a
   separate index. Nagios range thresholds (`10:20`, `@0:5`, `~:10`) are kept as strings.
 - **Survives Splunk outages**: while Splunk is unreachable, events are written to a
@@ -188,7 +190,14 @@ Set `ICINGA2_SPLUNK_CONFIG` or pass `--config` to use a different file.
 | `include_perfdata`          | `INCLUDE_PERFDATA`          | `true`                 | Send perfdata (subscribes to `CheckResult`)         |
 | `include_check_results`     | `INCLUDE_CHECK_RESULTS`     | `false`                | Also send CheckResult events                        |
 | `check_result_state_filter` | `CHECK_RESULT_STATE_FILTER` | `[1, 2, 3]`            | CheckResult states to send; `[]` sends all          |
-| `heartbeat_timeout`         | `HEARTBEAT_TIMEOUT`         | `300`                  | Reconnect if no data arrives for this many seconds  |
+| `heartbeat_timeout`         | `HEARTBEAT_TIMEOUT`         | `300`                  | Reconnect if no data arrives for this many seconds (see below) |
+
+Icinga2 sends nothing on the event stream while no subscribed events happen, so the
+client can't tell a quiet stream from a dead connection. After `heartbeat_timeout`
+seconds without data it reconnects immediately (logged at INFO). Events that occur
+during the short resubscribe are missed. With perfdata enabled there is a steady
+flow of CheckResult events and this rarely happens. If you subscribe only to rare
+event types, raise `heartbeat_timeout` (e.g. to `3600`).
 
 ### Splunk
 
@@ -227,12 +236,18 @@ The client sorts every HEC response into one of three groups:
 | Response                                                                 | Meaning           | Action                                                                                         |
 | ------------------------------------------------------------------------ | ----------------- | ---------------------------------------------------------------------------------------------- |
 | 2xx                                                                      | Delivered         | –                                                                                              |
-| 400 for a malformed event, 413 too large                                 | Bad data          | Only the offending event is discarded and logged. The batch is split to find it if needed.    |
-| Connection error, timeout, 429, 5xx, 401, 403, 404, 400 "Incorrect index" | Splunk unavailable | Nothing is discarded. Events go to the spool, and delivery is retried with backoff from 1 s up to `retry_max_interval`. |
+| 400 with a malformed-event code (6, 12, 13, 15–21), 413 too large       | Bad data          | Only the offending event is discarded and logged. The batch is split to find it if needed.    |
+| Connection error, timeout, 3xx, 429, 5xx, 401, 403, 404, any other 400 (e.g. "Incorrect index") | Splunk unavailable | Nothing is discarded. Events go to the spool, and delivery is retried with backoff from 1 s up to `retry_max_interval`. |
 
-Authentication and index errors count as "unavailable" rather than "bad data". They
-are usually configuration problems an admin can fix, and the events should survive
-until then. They are logged at ERROR level.
+Redirects, authentication errors and other unexpected 400 responses count as
+"unavailable" rather than "bad data". They are usually configuration problems an
+admin can fix, and the events should survive until then. They are logged at ERROR
+level. Redirects are never followed, so the HEC token can't be sent to another host;
+set `splunk_hec_url` to the final URL.
+
+Because these responses block delivery, a batch that Splunk keeps rejecting with an
+unexpected 400 holds back all later events until the cause is fixed or the spool
+limits are reached. Watch for "Could not deliver" errors in the log.
 
 When Splunk is reachable again, the spool is replayed oldest first, then live events
 follow. During replay, new events are moved to the spool so memory stays bounded.
