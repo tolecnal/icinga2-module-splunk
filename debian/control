@@ -8,6 +8,7 @@ Build-Depends:
  python3 (>= 3.10),
  python3-pytest <!nocheck>,
  python3-requests <!nocheck>,
+ python3-trustme <!nocheck>,
 Standards-Version: 4.6.0
 Homepage: https://github.com/tolecnal/icinga2-module-splunk
 Vcs-Git: https://github.com/tolecnal/icinga2-module-splunk.git

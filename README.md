@@ -192,6 +192,16 @@ Set `ICINGA2_SPLUNK_CONFIG` or pass `--config` to use a different file.
 | `icinga2_api_client_cert` | `ICINGA2_API_CLIENT_CERT` | –        | Client certificate path (alternative auth)        |
 | `icinga2_api_client_key`  | `ICINGA2_API_CLIENT_KEY`  | –        | Client key path                                   |
 | `icinga2_api_verify_ssl`  | `ICINGA2_API_VERIFY_SSL`  | `true`   | `true`/`false`, or a CA bundle path (recommended) |
+| `icinga2_api_tls_server_name` | `ICINGA2_API_TLS_SERVER_NAME` | `""` | Name to verify the API certificate against, if not the URL host (see below) |
+
+Icinga2 issues each node a certificate for its node name, usually its FQDN. If
+`icinga2_api_url` uses another name (an alias, IP address or load balancer), TLS
+verification fails with "Hostname mismatch". Either use the node name in the URL, or
+keep the URL and set `icinga2_api_tls_server_name` to the node name. The certificate is
+still fully verified, against that name instead of the URL host.
+`icinga2-splunk-check` prints the names the certificate is valid for when this
+happens. Don't set `icinga2_api_verify_ssl` to `false` to work around it, because
+that turns off certificate checking entirely.
 
 ### Event stream
 

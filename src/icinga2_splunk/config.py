@@ -97,6 +97,7 @@ _ENV_OVERRIDES: dict[str, tuple[str, Callable[[str], Any]]] = {
     "ICINGA2_API_CLIENT_CERT": ("icinga2_api_client_cert", str),
     "ICINGA2_API_CLIENT_KEY": ("icinga2_api_client_key", str),
     "ICINGA2_API_VERIFY_SSL": ("icinga2_api_verify_ssl", _parse_verify),
+    "ICINGA2_API_TLS_SERVER_NAME": ("icinga2_api_tls_server_name", str),
     "SPLUNK_HEC_URL": ("splunk_hec_url", str),
     "SPLUNK_HEC_TOKEN": ("splunk_hec_token", str),
     "SPLUNK_VERIFY_SSL": ("splunk_verify_ssl", _parse_verify),
@@ -145,6 +146,9 @@ class Config:
     icinga2_api_client_cert: str | None = None
     icinga2_api_client_key: str | None = None
     icinga2_api_verify_ssl: VerifySetting = True
+    # Name to verify the Icinga2 certificate against (and send as SNI) when it
+    # differs from the host in icinga2_api_url. Empty: use the URL host.
+    icinga2_api_tls_server_name: str = ""
 
     splunk_verify_ssl: VerifySetting = True
     splunk_index_events: str = "icinga2_events"
@@ -242,6 +246,12 @@ class Config:
                 "icinga2_api_username/icinga2_api_password or "
                 "icinga2_api_client_cert/icinga2_api_client_key"
             )
+
+        server_name = self.icinga2_api_tls_server_name
+        if not isinstance(server_name, str) or any(c.isspace() or c in "/@" for c in server_name):
+            errors.append("icinga2_api_tls_server_name must be a host name")
+        elif server_name and not self.icinga2_api_url.startswith("https://"):
+            errors.append("icinga2_api_tls_server_name requires an https:// icinga2_api_url")
 
         for name in ("icinga2_api_verify_ssl", "splunk_verify_ssl"):
             val = getattr(self, name)
