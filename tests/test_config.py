@@ -47,6 +47,10 @@ def test_missing_file_uses_environment(tmp_path: Path) -> None:
         "CHECK_RESULT_STATE_FILTER": "2,3",
         "INCLUDE_PERFDATA": "no",
         "LOG_LEVEL": "debug",
+        "SPOOL_DIR": "",
+        "SPOOL_MAX_SIZE_MB": "512",
+        "SPOOL_MAX_AGE_DAYS": "1.5",
+        "RETRY_MAX_INTERVAL": "120",
     }
     config = Config.load(tmp_path / "missing.json", environ=env)
     assert config.icinga2_api_url == "https://icinga:5665"
@@ -62,6 +66,10 @@ def test_missing_file_uses_environment(tmp_path: Path) -> None:
     assert config.check_result_state_filter == [2, 3]
     assert config.include_perfdata is False
     assert config.log_level == "DEBUG"
+    assert config.spool_dir == ""
+    assert config.spool_max_size_mb == 512
+    assert config.spool_max_age_days == 1.5
+    assert config.retry_max_interval == 120
 
 
 def test_numeric_password_from_env_stays_string(
@@ -137,7 +145,11 @@ def test_auth_required(base_settings: dict[str, Any]) -> None:
         ({"batch_size": 0}, "batch_size"),
         ({"batch_size": True}, "batch_size"),
         ({"max_queue_size": "10"}, "max_queue_size"),
-        ({"max_retries": -1}, "max_retries"),
+        ({"retry_max_interval": 0.5}, "retry_max_interval"),
+        ({"spool_dir": "relative/path"}, "spool_dir"),
+        ({"spool_dir": 5}, "spool_dir"),
+        ({"spool_max_size_mb": 0}, "spool_max_size_mb"),
+        ({"spool_max_age_days": -1}, "spool_max_age_days"),
         ({"batch_timeout": 0}, "batch_timeout"),
         ({"heartbeat_timeout": "x"}, "heartbeat_timeout"),
         ({"include_perfdata": "yes"}, "include_perfdata"),
@@ -185,3 +197,18 @@ def test_repr_hides_secrets(make_config) -> None:
 )
 def test_normalize_hec_url(url: str) -> None:
     assert normalize_hec_url(url) == "https://s:8088"
+
+
+def test_removed_key_warns(
+    tmp_path: Path, base_settings: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    config = Config.load(write_config(tmp_path, {**base_settings, "max_retries": 3}), environ={})
+    assert not hasattr(config, "max_retries")
+    assert "'max_retries' is no longer used" in caplog.text
+
+
+def test_spool_defaults(make_config) -> None:
+    config = make_config()
+    assert config.spool_dir == "/var/lib/icinga2-splunk/spool"
+    assert config.spool_max_size_mb == 1024
+    assert config.spool_max_age_days == 7

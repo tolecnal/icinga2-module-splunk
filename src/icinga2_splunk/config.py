@@ -42,6 +42,13 @@ _LEGACY_KEYS = {
     "splunk_batch_interval": "batch_timeout",
 }
 
+# Keys that are no longer used; accepted with a warning so old files still load.
+_REMOVED_KEYS = {
+    "max_retries": "delivery is now retried until the spool limits are reached",
+}
+
+DEFAULT_SPOOL_DIR = "/var/lib/icinga2-splunk/spool"
+
 _HEC_ENDPOINT_SUFFIXES = (
     "/services/collector/event/1.0",
     "/services/collector/event",
@@ -102,7 +109,10 @@ _ENV_OVERRIDES: dict[str, tuple[str, Callable[[str], Any]]] = {
     "BATCH_SIZE": ("batch_size", int),
     "BATCH_TIMEOUT": ("batch_timeout", float),
     "MAX_QUEUE_SIZE": ("max_queue_size", int),
-    "MAX_RETRIES": ("max_retries", int),
+    "SPOOL_DIR": ("spool_dir", str),
+    "SPOOL_MAX_SIZE_MB": ("spool_max_size_mb", float),
+    "SPOOL_MAX_AGE_DAYS": ("spool_max_age_days", float),
+    "RETRY_MAX_INTERVAL": ("retry_max_interval", float),
     "HEARTBEAT_TIMEOUT": ("heartbeat_timeout", float),
     "LOG_LEVEL": ("log_level", str),
 }
@@ -148,7 +158,10 @@ class Config:
     batch_size: int = 100
     batch_timeout: float = 10.0
     max_queue_size: int = 10_000
-    max_retries: int = 3
+    retry_max_interval: float = 60.0
+    spool_dir: str = DEFAULT_SPOOL_DIR
+    spool_max_size_mb: float = 1024.0
+    spool_max_age_days: float = 7.0
     heartbeat_timeout: float = 300.0
     log_level: str = "INFO"
 
@@ -255,8 +268,21 @@ class Config:
                 "max_queue_size must be a positive integer",
             ),
             (
-                is_int(self.max_retries) and self.max_retries >= 0,
-                "max_retries must be a non-negative integer",
+                is_number(self.retry_max_interval) and self.retry_max_interval >= 1,
+                "retry_max_interval must be a number >= 1",
+            ),
+            (
+                isinstance(self.spool_dir, str)
+                and (self.spool_dir == "" or self.spool_dir.startswith("/")),
+                "spool_dir must be an absolute path, or empty to disable the spool",
+            ),
+            (
+                is_number(self.spool_max_size_mb) and self.spool_max_size_mb > 0,
+                "spool_max_size_mb must be a positive number",
+            ),
+            (
+                is_number(self.spool_max_age_days) and self.spool_max_age_days > 0,
+                "spool_max_age_days must be a positive number",
             ),
             (
                 is_number(self.batch_timeout) and self.batch_timeout > 0,
@@ -345,6 +371,10 @@ def _apply_legacy_keys(data: dict[str, Any]) -> dict[str, Any]:
             else:
                 logger.warning("Config key %r is deprecated, use %r instead", old, new)
                 result[new] = value
+    for key, reason in _REMOVED_KEYS.items():
+        if key in result:
+            result.pop(key)
+            logger.warning("Config key %r is no longer used: %s", key, reason)
     return result
 
 
