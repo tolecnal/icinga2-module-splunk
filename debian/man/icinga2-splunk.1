@@ -1,0 +1,36 @@
+.TH ICINGA2-SPLUNK 1 "November 2026" "icinga2-splunk" "User Commands"
+.SH NAME
+icinga2-splunk \- stream Icinga2 events and performance data to Splunk
+.SH SYNOPSIS
+.B icinga2-splunk
+[\fB\-c\fR \fIFILE\fR] [\fB\-\-version\fR]
+.SH DESCRIPTION
+Subscribes to the Icinga2 API event stream and forwards events and
+performance data to Splunk through the HTTP Event Collector. While Splunk is
+unavailable, events are kept in a size- and age-limited disk spool and
+delivered when it is reachable again.
+.PP
+Normally run by systemd as the \fBicinga2-splunk\fR service.
+.SH OPTIONS
+.TP
+\fB\-c\fR, \fB\-\-config\fR \fIFILE\fR
+Configuration file (default: \fI/etc/icinga2-splunk/splunk_config.json\fR).
+.TP
+\fB\-\-version\fR
+Print the version and exit.
+.SH ENVIRONMENT
+Every configuration option can be overridden with an environment variable,
+for example \fBSPLUNK_HEC_TOKEN\fR. The service reads them from
+\fI/etc/default/icinga2-splunk\fR.
+.SH EXIT STATUS
+0 on a clean shutdown, 78 on a configuration or spool directory error.
+.SH FILES
+.TP
+.I /etc/icinga2-splunk/splunk_config.json
+Configuration.
+.TP
+.I /var/lib/icinga2-splunk/spool
+Events waiting for delivery to Splunk.
+.SH SEE ALSO
+.BR icinga2-splunk-check (1),
+.I /usr/share/doc/icinga2-splunk/README.md.gz

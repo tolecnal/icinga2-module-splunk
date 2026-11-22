@@ -1,0 +1,33 @@
+Source: icinga2-splunk
+Section: net
+Priority: optional
+Maintainer: Jostein Elvaker Haande <jehaande@gmail.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ dh-python,
+ python3 (>= 3.10),
+ python3-pytest <!nocheck>,
+ python3-requests <!nocheck>,
+Standards-Version: 4.6.0
+Homepage: https://github.com/tolecnal/icinga2-module-splunk
+Vcs-Git: https://github.com/tolecnal/icinga2-module-splunk.git
+Vcs-Browser: https://github.com/tolecnal/icinga2-module-splunk
+Rules-Requires-Root: no
+
+Package: icinga2-splunk
+Architecture: all
+Depends:
+ ${misc:Depends},
+ ${python3:Depends},
+ adduser,
+ python3 (>= 3.10),
+ python3-requests (>= 2.25),
+Suggests:
+ icinga2,
+Description: stream Icinga2 events and performance data to Splunk
+ Subscribes to the Icinga2 API event stream and forwards state changes,
+ notifications, acknowledgements, comments, downtimes and performance data
+ to Splunk through the HTTP Event Collector (HEC).
+ .
+ Events are batched and retried, and buffered in a size- and age-limited
+ disk spool while Splunk is unavailable.

@@ -1,0 +1,38 @@
+#!/usr/bin/make -f
+# The package is pure Python with no compiled parts. It is installed straight
+# into dist-packages instead of via pybuild, because the setuptools versions
+# shipped with the supported releases (Ubuntu 22.04: 59, Debian 12: 66) are too
+# old to read pyproject.toml.
+
+PKG     := icinga2-splunk
+DESTDIR := debian/$(PKG)
+PYDIR   := $(DESTDIR)/usr/lib/python3/dist-packages/icinga2_splunk
+
+%:
+	dh $@ --with python3
+
+# The top-level Makefile is for development (it creates a virtualenv); keep
+# debhelper from running it.
+override_dh_auto_configure override_dh_auto_build override_dh_auto_clean:
+
+override_dh_auto_test:
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	PYTHONPATH=src python3 -m pytest -q -p no:cacheprovider tests
+endif
+
+override_dh_auto_install:
+	install -d $(PYDIR)
+	install -m 0644 src/icinga2_splunk/*.py src/icinga2_splunk/py.typed $(PYDIR)/
+	install -D -m 0755 debian/scripts/icinga2-splunk $(DESTDIR)/usr/bin/icinga2-splunk
+	install -D -m 0755 debian/scripts/icinga2-splunk-check $(DESTDIR)/usr/bin/icinga2-splunk-check
+	install -D -m 0644 config.json.example $(DESTDIR)/etc/icinga2-splunk/splunk_config.json
+
+override_dh_installsystemd:
+	# Not enabled on install: the service needs configuring first. Once enabled
+	# by the admin, it is restarted on upgrades.
+	dh_installsystemd --no-enable
+
+override_dh_fixperms:
+	dh_fixperms
+	# Contains credentials; postinst sets the group to the service user.
+	chmod 0640 $(DESTDIR)/etc/icinga2-splunk/splunk_config.json

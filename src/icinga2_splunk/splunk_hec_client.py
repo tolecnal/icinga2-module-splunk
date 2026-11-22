@@ -215,7 +215,7 @@ class SplunkHECClient:
         Returns:
             True if everything was delivered.
         """
-        if self.spool is not None and not self._drain_spool():
+        if self.spool is not None and not self._drain_spool(stop_on_close=False):
             return False
         return self._deliver_memory(stop_on_close=False)
 
@@ -262,17 +262,22 @@ class SplunkHECClient:
             self._report_outage(now)
             return
 
-        if self.spool is not None and not self._drain_spool():
+        if self.spool is not None and not self._drain_spool(stop_on_close=True):
             return
         if self._deliver_memory(stop_on_close=True):
             self._leave_outage()
 
     # ---------------------------------------------------------------- delivery
 
-    def _drain_spool(self) -> bool:
-        """Replay spooled segments oldest first. Returns False on outage."""
+    def _drain_spool(self, *, stop_on_close: bool) -> bool:
+        """Replay spooled segments oldest first.
+
+        Returns:
+            True once the spool is empty; False on outage, or if ``stop_on_close``
+            is set and the client is closing.
+        """
         assert self.spool is not None  # noqa: S101 - for type narrowing
-        while not self._closed.is_set() or self._worker is None:
+        while not (stop_on_close and self._closed.is_set()):
             if self._replay is None:
                 oldest = self.spool.oldest()
                 if oldest is None:

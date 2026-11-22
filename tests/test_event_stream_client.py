@@ -493,3 +493,13 @@ def test_main_unwritable_spool(tmp_path, base_settings, monkeypatch) -> None:
 
     monkeypatch.setattr(esc, "EventStreamClient", boom)
     assert esc.main(["-c", str(path)]) == esc.EXIT_CONFIG_ERROR
+
+
+def test_check_result_without_perfdata(client, splunk) -> None:
+    client.handle_event({"type": "CheckResult", "host": "h", "check_result": {"state": 0}})
+    assert splunk.events == []
+
+
+def test_acknowledgement_set_has_no_cleared_by(client, splunk) -> None:
+    client.handle_event({"type": "AcknowledgementSet", "host": "h", "author": "bob"})
+    assert "cleared_by" not in splunk.events[0]["event"]

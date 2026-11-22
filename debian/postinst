@@ -1,0 +1,28 @@
+#!/bin/sh
+set -e
+
+USER=icinga2-splunk
+CONFIG=/etc/icinga2-splunk/splunk_config.json
+
+if [ "$1" = configure ]; then
+    if ! getent passwd "$USER" >/dev/null; then
+        adduser --system --group --quiet --no-create-home \
+            --home /var/lib/icinga2-splunk --gecos "Icinga2 to Splunk forwarder" "$USER"
+    fi
+
+    # The config holds credentials: readable by root and the service only.
+    if [ -f "$CONFIG" ] && ! dpkg-statoverride --list "$CONFIG" >/dev/null; then
+        chown root:"$USER" "$CONFIG"
+        chmod 0640 "$CONFIG"
+    fi
+
+    if [ -z "$2" ]; then
+        echo "icinga2-splunk: edit $CONFIG, then run:"
+        echo "  sudo -u $USER icinga2-splunk-check"
+        echo "  systemctl enable --now icinga2-splunk"
+    fi
+fi
+
+#DEBHELPER#
+
+exit 0

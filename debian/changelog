@@ -1,0 +1,5 @@
+icinga2-splunk (2.0.0) unstable; urgency=medium
+
+  * Initial Debian/Ubuntu package.
+
+ -- Jostein Elvaker Haande <jehaande@gmail.com>  Sun, 22 Nov 2026 19:00:00 +0100

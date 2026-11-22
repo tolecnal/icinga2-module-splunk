@@ -92,3 +92,7 @@ def test_to_dict() -> None:
         "min": None,
         "max": None,
     }
+
+
+def test_overflowing_value_is_dropped() -> None:
+    assert parse_perfdata("big=1e999 ok=1") == [Metric("ok", 1.0)]

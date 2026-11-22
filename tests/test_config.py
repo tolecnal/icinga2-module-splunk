@@ -212,3 +212,9 @@ def test_spool_defaults(make_config) -> None:
     assert config.spool_dir == "/var/lib/icinga2-splunk/spool"
     assert config.spool_max_size_mb == 1024
     assert config.spool_max_age_days == 7
+
+
+def test_boolean_env_true(tmp_path: Path, base_settings: dict[str, Any]) -> None:
+    path = write_config(tmp_path, base_settings)
+    config = Config.load(path, environ={"INCLUDE_CHECK_RESULTS": "Yes"})
+    assert config.include_check_results is True

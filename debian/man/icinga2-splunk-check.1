@@ -1,0 +1,22 @@
+.TH ICINGA2-SPLUNK-CHECK 1 "November 2026" "icinga2-splunk" "User Commands"
+.SH NAME
+icinga2-splunk-check \- check connectivity to Icinga2 and Splunk
+.SH SYNOPSIS
+.B icinga2-splunk-check
+[\fB\-c\fR \fIFILE\fR]
+.SH DESCRIPTION
+Validates the configuration, then checks that the Icinga2 API and its event
+stream accept the credentials and that Splunk HEC accepts the token. Nothing
+is indexed in Splunk. Run it as the service user before enabling the service:
+.PP
+.RS
+sudo \-u icinga2-splunk icinga2-splunk-check
+.RE
+.SH OPTIONS
+.TP
+\fB\-c\fR, \fB\-\-config\fR \fIFILE\fR
+Configuration file (default: \fI/etc/icinga2-splunk/splunk_config.json\fR).
+.SH EXIT STATUS
+0 if all checks pass, 1 otherwise.
+.SH SEE ALSO
+.BR icinga2-splunk (1)

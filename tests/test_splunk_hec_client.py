@@ -523,3 +523,84 @@ def test_worker_survives_unexpected_errors(caplog: pytest.LogCaptureFixture) -> 
     finally:
         client.close()
     assert "Unexpected error in Splunk delivery worker" in caplog.text
+
+
+# ------------------------------------------------------------- edge cases
+
+
+def test_flush_fails_while_spool_cannot_be_drained(tmp_path: Path) -> None:
+    spool = make_spool(tmp_path)
+    spool.append([json.dumps({"event": "old"})])
+    client, fake = make_client(FakeSplunk(down), spool=spool)
+    client.send("new")
+    assert client.flush() is False
+    assert client.pending == 0  # the outage moved the new event to disk too
+    fake.handler = lambda _e: response(200, OK)
+    assert client.flush() is True
+    assert fake.received == ["old", "new"]
+
+
+def test_cycle_stops_when_spool_replay_fails(tmp_path: Path) -> None:
+    spool = make_spool(tmp_path)
+    spool.append([json.dumps({"event": "old"})])
+    client, fake = make_client(FakeSplunk(down), spool=spool, clock=Clock())
+    client._cycle()
+    assert client.in_outage
+    assert len(fake.posts) == 1
+
+
+def test_drain_stops_when_closing(tmp_path: Path) -> None:
+    spool = make_spool(tmp_path)
+    spool.append([json.dumps({"event": "old"})])
+    client, fake = make_client(spool=spool)
+    client._closed.set()
+    assert client._drain_spool(stop_on_close=True) is False
+    assert fake.posts == []
+
+
+def test_invalid_last_event_in_batch() -> None:
+    def handler(events: list[dict[str, Any]]) -> Any:
+        if events[-1]["event"] == "BAD":
+            return response(
+                400, {"text": "Invalid data format", "code": 6, "invalid-event-number": 1}
+            )
+        return response(200, OK)
+
+    client, _ = make_client(FakeSplunk(handler))
+    client.send("good")
+    client.send("BAD")
+    assert client.flush() is True
+    assert client.sent_count == 1
+    assert client.dropped_count == 1
+
+
+def test_bisect_stops_if_first_half_hits_outage() -> None:
+    calls = {"n": 0}
+
+    def handler(_events: list[dict[str, Any]]) -> Any:
+        calls["n"] += 1
+        return response(413) if calls["n"] == 1 else requests.ConnectionError("gone")
+
+    client, fake = make_client(FakeSplunk(handler), batch_size=4)
+    for i in range(4):
+        client.send(i)
+    assert client.flush() is False
+    assert len(fake.posts) == 2  # second half never attempted
+    assert client.pending == 4
+
+
+def test_requeue_without_spool_respects_memory_limit() -> None:
+    fake = FakeSplunk()
+    client, _ = make_client(fake, batch_size=2, max_queue_size=3)
+
+    def handler(_events: list[dict[str, Any]]) -> Any:
+        for i in range(3):
+            client.send(f"live{i}")  # queue fills up while the request is in flight
+        return requests.ConnectionError("down")
+
+    fake.handler = handler
+    client.send("a")
+    client.send("b")
+    assert client.flush() is False
+    assert client.pending == 3
+    assert client.dropped_count == 2
