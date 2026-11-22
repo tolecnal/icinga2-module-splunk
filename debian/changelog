@@ -1,3 +1,17 @@
+icinga2-splunk (2.0.1) unstable; urgency=medium
+
+  * Only HTTP 2xx from Splunk HEC counts as delivered; redirects are kept
+    and retried instead of being silently dropped.
+  * Disk spool writes are all-or-nothing; disk errors in the spool are
+    logged instead of stopping delivery or shutdown.
+  * Idle event stream timeouts reconnect immediately and log at INFO.
+  * Reject embedded URL credentials, blank CA paths and non-finite numbers
+    in the configuration; limit event lines to 10 MiB.
+  * Fix busy loop during Splunk outages without a disk spool.
+  * Use adduser --comment where available.
+
+ -- Jostein Elvaker Haande <jehaande@gmail.com>  Sun, 22 Nov 2026 21:00:00 +0100
+
 icinga2-splunk (2.0.0) unstable; urgency=medium
 
   * Initial Debian/Ubuntu package.

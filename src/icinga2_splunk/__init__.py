@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 
 # Submodules are imported lazily so that ``python -m icinga2_splunk.<module>``
 # doesn't import the module twice (which makes runpy emit a RuntimeWarning).
