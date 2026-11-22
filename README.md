@@ -49,14 +49,15 @@ Splunk
 
 Packages are built for Debian 12 and 13 and for Ubuntu 22.04, 24.04 and 26.04. Each
 [release](https://github.com/tolecnal/icinga2-module-splunk/releases) has one `.deb`
-per distribution release, e.g. `icinga2-splunk_2.0.0~deb12_all.deb` or
-`icinga2-splunk_2.0.0~ubuntu24.04_all.deb`.
+per distribution release, e.g. `icinga2-splunk_2.0.0_deb12_all.deb` or
+`icinga2-splunk_2.0.0_ubuntu24.04_all.deb`. (The package version inside is
+`2.0.0~deb12`; release file names use `_` because GitHub doesn't allow `~`.)
 
 First create the Icinga2 API user and the Splunk HEC token (steps 2 and 3 of the script
 install below). Then:
 
 ```bash
-sudo apt install ./icinga2-splunk_2.0.0~deb12_all.deb
+sudo apt install ./icinga2-splunk_2.0.0_deb12_all.deb
 sudoedit /etc/icinga2-splunk/splunk_config.json
 sudo -u icinga2-splunk icinga2-splunk-check
 sudo systemctl enable --now icinga2-splunk
