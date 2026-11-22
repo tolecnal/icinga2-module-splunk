@@ -23,7 +23,7 @@ esac
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -qq -y --no-install-recommends \
-  build-essential debhelper dh-python python3 python3-pytest python3-requests lintian \
+  build-essential debhelper dh-python python3 python3-pytest python3-requests python3-trustme lintian \
   >/dev/null
 
 # Build from a copy so the release-specific changelog edit doesn't touch SRC_DIR.

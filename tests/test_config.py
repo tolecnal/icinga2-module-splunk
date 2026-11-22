@@ -169,6 +169,13 @@ def test_auth_required(base_settings: dict[str, Any]) -> None:
         ({"splunk_verify_ssl": 1}, "splunk_verify_ssl"),
         ({"splunk_verify_ssl": ""}, "splunk_verify_ssl"),
         ({"icinga2_api_verify_ssl": "   "}, "icinga2_api_verify_ssl"),
+        ({"icinga2_api_tls_server_name": "node example"}, "must be a host name"),
+        ({"icinga2_api_tls_server_name": "https://node"}, "must be a host name"),
+        ({"icinga2_api_tls_server_name": 5}, "must be a host name"),
+        (
+            {"icinga2_api_url": "http://icinga:5665", "icinga2_api_tls_server_name": "node"},
+            "requires an https://",
+        ),
         ({"event_types": "StateChange"}, "event_types"),
         ({"check_result_state_filter": ["2"]}, "check_result_state_filter"),
         ({"log_level": "LOUD"}, "log_level"),
@@ -284,3 +291,9 @@ def test_current_user_without_passwd_entry(make_config, monkeypatch) -> None:
     monkeypatch.setattr(config_module.pwd, "getpwuid", missing)
     config = make_config(splunk_verify_ssl="/nonexistent/ca.crt")
     assert f"uid {os.geteuid()}" in config.file_errors()[0]
+
+
+def test_tls_server_name_from_env(tmp_path: Path, base_settings: dict[str, Any]) -> None:
+    path = write_config(tmp_path, base_settings)
+    config = Config.load(path, environ={"ICINGA2_API_TLS_SERVER_NAME": "node.example"})
+    assert config.icinga2_api_tls_server_name == "node.example"

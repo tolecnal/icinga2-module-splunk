@@ -28,6 +28,7 @@ from icinga2_splunk.config import Config, ConfigError
 from icinga2_splunk.perfdata_parser import parse_perfdata
 from icinga2_splunk.splunk_hec_client import SplunkHECClient
 from icinga2_splunk.spool import DiskSpool
+from icinga2_splunk.tls import icinga2_session
 
 logger = logging.getLogger(__name__)
 
@@ -167,20 +168,21 @@ class EventStreamClient:
     Args:
         config: Validated configuration.
         splunk: HEC client; created from ``config`` if omitted.
-        session_factory: Callable returning a :class:`requests.Session`
-            (used for the Icinga2 connection; injectable for tests).
+        session_factory: Callable returning a :class:`requests.Session` for the
+            Icinga2 connection; defaults to :func:`icinga2_session` (injectable
+            for tests).
     """
 
     def __init__(
         self,
         config: Config,
         splunk: SplunkHECClient | None = None,
-        session_factory: Callable[[], requests.Session] = requests.Session,
+        session_factory: Callable[[], requests.Session] | None = None,
     ) -> None:
         """Set up the client; call :meth:`run` to start consuming."""
         self.config = config
         self.splunk = splunk or build_splunk_client(config)
-        self._session_factory = session_factory
+        self._session_factory = session_factory or (lambda: icinga2_session(config))
         self._stop = threading.Event()
         # Set when the last connection ended because the stream was idle.
         self._idle_timeout = False

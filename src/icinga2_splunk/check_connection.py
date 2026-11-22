@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Callable
+from urllib.parse import urlsplit
 
 import requests
 
@@ -17,21 +18,42 @@ from icinga2_splunk.event_stream_client import (
     silence_insecure_request_warnings,
     subscription_payload,
 )
+from icinga2_splunk.tls import certificate_names, icinga2_session, is_hostname_mismatch
 
 TIMEOUT = 10.0
 OK, FAIL, INFO = "✓", "✗", "i"
 
 
 def _icinga2_get(config: Config, path: str) -> requests.Response:
-    return requests.get(
-        f"{config.icinga2_api_url}{path}",
-        auth=config.icinga2_auth,
-        cert=config.icinga2_cert,
-        verify=config.icinga2_api_verify_ssl,
-        headers={"Accept": "application/json"},
-        allow_redirects=False,
-        timeout=TIMEOUT,
-    )
+    with icinga2_session(config) as session:
+        return session.get(
+            f"{config.icinga2_api_url}{path}",
+            auth=config.icinga2_auth,
+            cert=config.icinga2_cert,
+            verify=config.icinga2_api_verify_ssl,
+            headers={"Accept": "application/json"},
+            allow_redirects=False,
+            timeout=TIMEOUT,
+        )
+
+
+def _icinga2_connection_error(config: Config, exc: requests.RequestException) -> None:
+    print(f"{FAIL} Connection error: {exc}")
+    if not is_hostname_mismatch(exc):
+        return
+    url = urlsplit(config.icinga2_api_url)
+    names = certificate_names(url.hostname or "", url.port or 443, config.icinga2_api_verify_ssl)
+    if names:
+        print(f"  Hint: the Icinga2 certificate is valid for: {', '.join(names)}")
+        print(
+            "        Use one of these as the host in icinga2_api_url, or set "
+            f'"icinga2_api_tls_server_name": "{names[0]}"'
+        )
+    else:
+        print(
+            "  Hint: use the Icinga2 node name (the certificate's CN) as the host in "
+            "icinga2_api_url, or set icinga2_api_tls_server_name"
+        )
 
 
 def _fail_response(response: requests.Response) -> None:
@@ -54,7 +76,7 @@ def check_icinga2_api(config: Config) -> bool:
     try:
         response = _icinga2_get(config, "/v1/status/IcingaApplication")
     except requests.RequestException as exc:
-        print(f"{FAIL} Connection error: {exc}")
+        _icinga2_connection_error(config, exc)
         return False
 
     if response.status_code != 200:  # noqa: PLR2004
@@ -75,17 +97,20 @@ def check_event_stream(config: Config) -> bool:
     print("\n=== Icinga2 event stream ===")
     payload = subscription_payload(config, queue="icinga2-splunk-check")
     try:
-        with requests.post(
-            f"{config.icinga2_api_url}/v1/events",
-            json=payload,
-            auth=config.icinga2_auth,
-            cert=config.icinga2_cert,
-            verify=config.icinga2_api_verify_ssl,
-            headers={"Accept": "application/json"},
-            allow_redirects=False,
-            timeout=TIMEOUT,
-            stream=True,
-        ) as response:
+        with (
+            icinga2_session(config) as session,
+            session.post(
+                f"{config.icinga2_api_url}/v1/events",
+                json=payload,
+                auth=config.icinga2_auth,
+                cert=config.icinga2_cert,
+                verify=config.icinga2_api_verify_ssl,
+                headers={"Accept": "application/json"},
+                allow_redirects=False,
+                timeout=TIMEOUT,
+                stream=True,
+            ) as response,
+        ):
             if response.status_code != 200:  # noqa: PLR2004
                 _fail_response(response)
                 return False
@@ -98,7 +123,7 @@ def check_event_stream(config: Config) -> bool:
             except requests.RequestException:
                 print(f"{INFO} No events received within the timeout (normal if idle)")
     except requests.RequestException as exc:
-        print(f"{FAIL} Connection error: {exc}")
+        _icinga2_connection_error(config, exc)
         return False
     return True
 

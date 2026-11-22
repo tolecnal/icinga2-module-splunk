@@ -31,26 +31,26 @@ STATUS = {"results": [{"status": {"icingaapplication": {"app": {"version": "r2.1
 
 
 def test_icinga2_api_ok(make_config, capsys) -> None:
-    with mock.patch.object(cc.requests, "get", return_value=response(200, STATUS)) as get:
+    with mock.patch.object(cc.requests.Session, "get", return_value=response(200, STATUS)) as get:
         assert cc.check_icinga2_api(make_config()) is True
     assert "r2.14.2" in capsys.readouterr().out
     assert get.call_args.kwargs["auth"] == ("splunk", "secret")
 
 
 def test_icinga2_api_unexpected_body(make_config) -> None:
-    with mock.patch.object(cc.requests, "get", return_value=response(200, {"results": []})):
+    with mock.patch.object(cc.requests.Session, "get", return_value=response(200, {"results": []})):
         assert cc.check_icinga2_api(make_config()) is True
 
 
 @pytest.mark.parametrize(("status", "hint"), [(401, "username"), (403, "permissions"), (500, "")])
 def test_icinga2_api_http_errors(make_config, capsys, status: int, hint: str) -> None:
-    with mock.patch.object(cc.requests, "get", return_value=response(status)):
+    with mock.patch.object(cc.requests.Session, "get", return_value=response(status)):
         assert cc.check_icinga2_api(make_config()) is False
     assert hint in capsys.readouterr().out
 
 
 def test_icinga2_api_connection_error(make_config) -> None:
-    with mock.patch.object(cc.requests, "get", side_effect=requests.ConnectionError("x")):
+    with mock.patch.object(cc.requests.Session, "get", side_effect=requests.ConnectionError("x")):
         assert cc.check_icinga2_api(make_config()) is False
 
 
@@ -69,7 +69,7 @@ def test_event_stream(make_config, capsys, resp, expected: bool, text: str) -> N
         include_check_results=False,
         event_stream_filter='host.name == "web1"',
     )
-    with mock.patch.object(cc.requests, "post", return_value=resp) as post:
+    with mock.patch.object(cc.requests.Session, "post", return_value=resp) as post:
         assert cc.check_event_stream(cfg) is expected
     assert text in capsys.readouterr().out
     assert post.call_args.kwargs["json"] == {
@@ -81,7 +81,7 @@ def test_event_stream(make_config, capsys, resp, expected: bool, text: str) -> N
 
 
 def test_event_stream_connection_error(make_config) -> None:
-    with mock.patch.object(cc.requests, "post", side_effect=requests.ConnectionError("x")):
+    with mock.patch.object(cc.requests.Session, "post", side_effect=requests.ConnectionError("x")):
         assert cc.check_event_stream(make_config()) is False
 
 
@@ -123,7 +123,7 @@ def test_main_config_error(tmp_path, monkeypatch) -> None:
 
 
 def test_event_stream_ends_without_event(make_config, capsys) -> None:
-    with mock.patch.object(cc.requests, "post", return_value=response(200, lines=[])):
+    with mock.patch.object(cc.requests.Session, "post", return_value=response(200, lines=[])):
         assert cc.check_event_stream(make_config()) is True
     assert "Received an event" not in capsys.readouterr().out
 
