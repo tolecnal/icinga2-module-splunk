@@ -63,9 +63,21 @@ def test_icinga2_api_connection_error(make_config) -> None:
     ],
 )
 def test_event_stream(make_config, capsys, resp, expected: bool, text: str) -> None:
-    with mock.patch.object(cc.requests, "post", return_value=resp):
-        assert cc.check_event_stream(make_config()) is expected
+    cfg = make_config(
+        event_types=["StateChange", "Notification"],
+        include_perfdata=False,
+        include_check_results=False,
+        event_stream_filter='host.name == "web1"',
+    )
+    with mock.patch.object(cc.requests, "post", return_value=resp) as post:
+        assert cc.check_event_stream(cfg) is expected
     assert text in capsys.readouterr().out
+    assert post.call_args.kwargs["json"] == {
+        "queue": "icinga2-splunk-check",
+        "types": ["StateChange", "Notification"],
+        "filter": 'host.name == "web1"',
+    }
+    assert post.call_args.kwargs["allow_redirects"] is False
 
 
 def test_event_stream_connection_error(make_config) -> None:
@@ -79,6 +91,7 @@ def test_event_stream_connection_error(make_config) -> None:
         (response(400, {"text": "No data", "code": 5}), True),
         (response(200, {"text": "Success", "code": 0}), True),
         (response(403, {"text": "Invalid token", "code": 4}), False),
+        (response(400, ["not-a-dict"]), False),
         (response(404), False),
     ],
 )
@@ -86,6 +99,7 @@ def test_splunk_hec(make_config, resp, expected: bool) -> None:
     with mock.patch.object(cc.requests, "post", return_value=resp) as post:
         assert cc.check_splunk_hec(make_config()) is expected
     assert post.call_args.args[0] == "https://splunk.example.com:8088/services/collector/event"
+    assert post.call_args.kwargs["allow_redirects"] is False
 
 
 def test_splunk_hec_connection_error(make_config) -> None:

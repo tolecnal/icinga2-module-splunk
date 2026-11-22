@@ -10,11 +10,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import signal
 import sys
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from types import FrameType
 from typing import Any
 
@@ -33,6 +34,7 @@ Event = Mapping[str, Any]
 CONNECT_TIMEOUT = 10.0
 RECONNECT_DELAY_MIN = 1.0
 RECONNECT_DELAY_MAX = 60.0
+MAX_EVENT_LINE_BYTES = 10 * 1024 * 1024  # 10 MiB
 
 # Exit code for configuration errors (sysexits.h EX_CONFIG); the systemd unit
 # uses RestartPreventExitStatus so a broken config doesn't cause a restart loop.
@@ -41,6 +43,55 @@ EXIT_CONFIG_ERROR = 78
 HOST_STATES = {0: "UP", 1: "DOWN"}
 SERVICE_STATES = {0: "OK", 1: "WARNING", 2: "CRITICAL", 3: "UNKNOWN"}
 STATE_TYPES = {0: "SOFT", 1: "HARD"}
+
+
+def subscription_payload(config: Config, queue: str | None = None) -> dict[str, Any]:
+    """Return the request body used to subscribe to the Icinga2 event stream."""
+    types = list(dict.fromkeys(config.event_types))
+    wants_check_results = config.include_check_results or config.include_perfdata
+    if wants_check_results and "CheckResult" not in types:
+        types.append("CheckResult")
+
+    payload: dict[str, Any] = {"queue": queue or config.event_stream_queue, "types": types}
+    if config.event_stream_filter:
+        payload["filter"] = config.event_stream_filter
+    return payload
+
+
+def _iter_bounded_lines(
+    response: requests.Response, max_bytes: int = MAX_EVENT_LINE_BYTES
+) -> Iterator[bytes]:
+    """Yield lines from a streaming response, discarding any longer than ``max_bytes``."""
+    buf = bytearray()
+    dropping = False
+    for chunk in response.iter_content(chunk_size=8192):
+        if not chunk:
+            continue
+        start = 0
+        while (nl := chunk.find(b"\n", start)) != -1:
+            part = chunk[start:nl]
+            start = nl + 1
+            if dropping:
+                dropping = False
+                continue
+            if len(buf) + len(part) > max_bytes:
+                logger.error("Ignoring event line exceeding %d bytes", max_bytes)
+                buf.clear()
+                continue
+            buf.extend(part)
+            yield bytes(buf).rstrip(b"\r")
+            buf.clear()
+        tail = chunk[start:]
+        if dropping:
+            continue
+        if len(buf) + len(tail) > max_bytes:
+            logger.error("Ignoring event line exceeding %d bytes", max_bytes)
+            buf.clear()
+            dropping = True
+        else:
+            buf.extend(tail)
+    if buf and not dropping:
+        yield bytes(buf).rstrip(b"\r")
 
 
 def _object_name(host: str | None, service: str | None) -> str | None:
@@ -158,25 +209,19 @@ class EventStreamClient:
         """Stop the client and flush all pending events to Splunk."""
         self.stop()
         self.splunk.close()
+        spool = getattr(self.splunk, "spool", None)
+        dropped = self.splunk.dropped_count + (spool.dropped_count if spool is not None else 0)
         logger.info(
             "Splunk client closed: %d events sent, %d dropped",
             self.splunk.sent_count,
-            self.splunk.dropped_count,
+            dropped,
         )
 
     # ------------------------------------------------------------ connection
 
     def subscription(self) -> dict[str, Any]:
         """Return the request body used to subscribe to the event stream."""
-        types = list(dict.fromkeys(self.config.event_types))
-        wants_check_results = self.config.include_check_results or self.config.include_perfdata
-        if wants_check_results and "CheckResult" not in types:
-            types.append("CheckResult")
-
-        payload: dict[str, Any] = {"queue": self.config.event_stream_queue, "types": types}
-        if self.config.event_stream_filter:
-            payload["filter"] = self.config.event_stream_filter
-        return payload
+        return subscription_payload(self.config)
 
     def _consume(self) -> bool:
         """Open one event stream connection and process it until it ends.
@@ -202,6 +247,7 @@ class EventStreamClient:
                     cert=self.config.icinga2_cert,
                     verify=self.config.icinga2_api_verify_ssl,
                     stream=True,
+                    allow_redirects=False,
                     timeout=(CONNECT_TIMEOUT, self.config.heartbeat_timeout),
                 ) as response:
                     if response.status_code != 200:  # noqa: PLR2004
@@ -214,7 +260,7 @@ class EventStreamClient:
 
                     connected = True
                     logger.info("Connected to Icinga2 event stream")
-                    for line in response.iter_lines():
+                    for line in _iter_bounded_lines(response):
                         if self._stop.is_set():
                             break
                         if line:
@@ -262,7 +308,9 @@ class EventStreamClient:
     @staticmethod
     def _timestamp(event: Event) -> float:
         ts = event.get("timestamp")
-        return float(ts) if isinstance(ts, (int, float)) else time.time()
+        if isinstance(ts, (int, float)) and not isinstance(ts, bool) and math.isfinite(ts):
+            return float(ts)
+        return time.time()
 
     @staticmethod
     def _base(event: Event, host: str | None, service: str | None) -> dict[str, Any]:
@@ -280,7 +328,11 @@ class EventStreamClient:
         host, service = event.get("host"), event.get("service")
         check_result = _as_dict(event.get("check_result"))
         end = check_result.get("execution_end")
-        timestamp = float(end) if isinstance(end, (int, float)) else self._timestamp(event)
+        timestamp = (
+            float(end)
+            if isinstance(end, (int, float)) and not isinstance(end, bool) and math.isfinite(end)
+            else self._timestamp(event)
+        )
         state = check_result.get("state")
 
         state_filter = self.config.check_result_state_filter

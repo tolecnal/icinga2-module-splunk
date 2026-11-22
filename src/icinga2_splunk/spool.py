@@ -177,9 +177,8 @@ class DiskSpool:
             except FileNotFoundError:
                 self._segments.pop(path, None)
                 continue
-            if mtime >= cutoff:
-                break
-            self._drop(path, "older than the spool age limit")
+            if mtime < cutoff:
+                self._drop(path, "older than the spool age limit")
         self._enforce_size()
 
     def _enforce_size(self) -> None:

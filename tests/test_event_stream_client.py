@@ -275,9 +275,16 @@ def test_event_without_type_ignored(client, splunk) -> None:
 
 
 class FakeResponse:
-    def __init__(self, status: int, lines: list[bytes] | Exception = (), text: str = "") -> None:
+    def __init__(
+        self,
+        status: int,
+        lines: list[bytes] | Exception = (),
+        text: str = "",
+        chunks: list[bytes] | None = None,
+    ) -> None:
         self.status_code = status
         self._lines = lines
+        self._chunks = chunks
         self.text = text
 
     def __enter__(self) -> FakeResponse:
@@ -286,10 +293,14 @@ class FakeResponse:
     def __exit__(self, *_: Any) -> None:
         pass
 
-    def iter_lines(self):
+    def iter_content(self, chunk_size: int = 8192):
         if isinstance(self._lines, Exception):
             raise self._lines
-        yield from self._lines
+        if self._chunks is not None:
+            yield from self._chunks
+            return
+        for line in self._lines:
+            yield line + b"\n"
 
 
 class FakeSession:
@@ -503,3 +514,31 @@ def test_check_result_without_perfdata(client, splunk) -> None:
 def test_acknowledgement_set_has_no_cleared_by(client, splunk) -> None:
     client.handle_event({"type": "AcknowledgementSet", "host": "h", "author": "bob"})
     assert "cleared_by" not in splunk.events[0]["event"]
+
+
+def test_iter_bounded_lines_drops_oversized_and_handles_chunks(caplog) -> None:
+    chunks = [
+        b"",
+        b'{"type":"StateChange","host":"a"}\r\n',
+        b"x" * 45 + b"\n",  # oversized within single chunk
+        b"y" * 45,  # oversized spanning chunks (tail triggers dropping)
+        b"z" * 45,  # still dropping
+        b"w\n",  # finishes dropped line
+        b'{"type":"StateChange","host":"b"}',  # trailing line without newline
+    ]
+    resp = FakeResponse(200, chunks=chunks)
+    lines = list(esc._iter_bounded_lines(resp, max_bytes=40))  # type: ignore[arg-type]
+    assert lines == [
+        b'{"type":"StateChange","host":"a"}',
+        b'{"type":"StateChange","host":"b"}',
+    ]
+    assert "Ignoring event line exceeding" in caplog.text
+
+
+def test_close_logs_spool_dropped_count(make_config, splunk, caplog) -> None:
+    splunk.dropped_count = 2
+    splunk.spool = mock.Mock(dropped_count=5)
+    client = EventStreamClient(make_config(), splunk=splunk)
+    with caplog.at_level("INFO"):
+        client.close()
+    assert "7 dropped" in caplog.text

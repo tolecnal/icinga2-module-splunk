@@ -45,7 +45,8 @@ class FakeSplunk:
         self.closed = False
         self.lock = threading.Lock()
 
-    def post(self, url: str, data: bytes, timeout: float) -> Any:
+    def post(self, url: str, data: bytes, timeout: float, *, allow_redirects: bool = True) -> Any:
+        assert allow_redirects is False
         events = [json.loads(line) for line in data.decode().splitlines()]
         with self.lock:
             self.posts.append(events)
@@ -179,8 +180,8 @@ def test_invalid_event_number_skips_only_that_event(caplog: pytest.LogCaptureFix
     client, _ = make_client(fake)
     original_post = fake.post
 
-    def post(url: str, data: bytes, timeout: float) -> Any:
-        result = original_post(url, data, timeout)
+    def post(url: str, data: bytes, timeout: float, *, allow_redirects: bool = True) -> Any:
+        result = original_post(url, data, timeout, allow_redirects=allow_redirects)
         if not result.ok:
             events = [json.loads(line)["event"] for line in data.decode().splitlines()]
             accepted.extend(events[: json.loads(result.text)["invalid-event-number"]])
@@ -233,6 +234,8 @@ def test_single_oversized_event_is_discarded() -> None:
     ("status", "body"),
     [
         (400, {"text": "Incorrect index", "code": 7, "invalid-event-number": 0}),
+        (400, {"text": "Data channel is missing", "code": 10}),
+        (400, None),
         (401, {"text": "Token is required", "code": 2}),
         (403, {"text": "Invalid token", "code": 4}),
         (404, None),
@@ -604,3 +607,99 @@ def test_requeue_without_spool_respects_memory_limit() -> None:
     assert client.flush() is False
     assert client.pending == 3
     assert client.dropped_count == 2
+
+
+def test_nan_event_is_dropped(caplog: pytest.LogCaptureFixture) -> None:
+    client, _ = make_client()
+    client.send({"v": float("nan")})
+    assert client.pending == 0
+    assert "cannot be serialized" in caplog.text
+
+
+def test_many_invalid_events_do_not_recurse() -> None:
+    def handler(events: list[dict[str, Any]]) -> Any:
+        if events[0]["event"] == "BAD":
+            return response(
+                400, {"text": "Invalid data format", "code": 6, "invalid-event-number": 0}
+            )
+        return response(200, OK)
+
+    client, fake = make_client(FakeSplunk(handler), batch_size=600)
+    for _ in range(550):
+        client.send("BAD")
+    client.send("good")
+    assert client.flush() is True
+    assert client.dropped_count == 550
+    assert fake.received == ["good"]
+
+
+def test_outage_without_spool_does_not_busy_spin() -> None:
+    client, _ = make_client(
+        FakeSplunk(down), batch_size=2, batch_timeout=5.0, retry_initial=5.0, retry_max=5.0
+    )
+    cycles = 0
+    original_cycle = client._cycle
+
+    def counting_cycle() -> None:
+        nonlocal cycles
+        cycles += 1
+        original_cycle()
+
+    client._cycle = counting_cycle  # type: ignore[method-assign]
+    client.start()
+    try:
+        client.send(1)
+        client.send(2)
+        assert wait_for(lambda: client.in_outage)
+        time.sleep(0.05)
+        assert cycles == 1
+    finally:
+        client.close()
+
+
+def test_spool_write_error_keeps_worker_alive(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    spool = make_spool(tmp_path)
+    fake = FakeSplunk(down)
+    client, _ = make_client(
+        fake,
+        spool=spool,
+        batch_size=1,
+        batch_timeout=0.02,
+        retry_initial=0.02,
+        retry_max=0.02,
+    )
+    with mock.patch.object(spool, "append", side_effect=OSError("No space left on device")):
+        client.start()
+        try:
+            client.send(1)
+            assert wait_for(lambda: client.in_outage and client._spool_error)
+            assert client._worker is not None and client._worker.is_alive()
+            assert "Failed to write" in caplog.text
+            # Second cycle hits _spill_memory while spool still fails.
+            client.send(2)
+            time.sleep(0.05)
+            assert client._worker.is_alive()
+            fake.handler = lambda _e: response(200, OK)
+            assert wait_for(lambda: sorted(fake.received) == [1, 2])
+            assert not client._spool_error
+        finally:
+            client.close()
+
+
+def test_close_respects_deadline_and_spills_remainder(tmp_path: Path) -> None:
+    clock = Clock()
+    spool = make_spool(tmp_path)
+
+    def slow_ok(_events: list[dict[str, Any]]) -> Any:
+        clock.now += 10.0
+        return response(200, OK)
+
+    client, fake = make_client(FakeSplunk(slow_ok), spool=spool, clock=clock, batch_size=1)
+    client.send(1)
+    client.send(2)
+    client.send(3)
+    client.close(timeout=5.0)
+    assert fake.received == [1]
+    assert spool.size_bytes > 0

@@ -9,7 +9,9 @@ and the Splunk HTTP Event Collector (HEC).
 - **Real-time streaming** from the Icinga2 `/v1/events` API: no per-check processes.
 - **Event types**: StateChange, Notification, Acknowledgement set/cleared, Comment
   added/removed, Downtime added/removed/started/triggered, and optionally raw
-  CheckResults. Any other subscribed type (e.g. `ObjectCreated`) is forwarded as is.
+  CheckResults. Any other subscribed type (e.g. `ObjectCreated`) is forwarded as is
+  (note: generic events are not filtered, so avoid subscribing to object-change types
+  if your Icinga2 objects contain secrets in custom variables).
 - **Performance data**: each metric becomes its own event, with thresholds, in a
   separate index. Nagios range thresholds (`10:20`, `@0:5`, `~:10`) are kept as strings.
 - **Survives Splunk outages**: while Splunk is unreachable, events are written to a

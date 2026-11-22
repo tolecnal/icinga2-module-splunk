@@ -80,6 +80,20 @@ def test_dict_with_string_range_threshold() -> None:
 
 def test_non_finite_values_are_dropped() -> None:
     assert parse_perfdata("x=1;inf;nan;-inf;nan")[0] == Metric("x", 1.0, "", "inf", "nan")
+    assert parse_perfdata(
+        [
+            {"label": "bad_val", "value": float("nan")},
+            {"label": "inf_val", "value": float("inf")},
+            {
+                "label": "ok",
+                "value": 1.0,
+                "warn": float("inf"),
+                "crit": float("nan"),
+                "min": float("-inf"),
+                "max": float("inf"),
+            },
+        ]
+    ) == [Metric("ok", 1.0)]
 
 
 def test_to_dict() -> None:

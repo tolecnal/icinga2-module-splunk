@@ -56,10 +56,14 @@ else
 fi
 
 echo "Installing systemd unit ${UNIT_FILE}..."
-sed -e "s|^User=.*|User=${SERVICE_USER}|" \
-    -e "s|^Group=.*|Group=${SERVICE_USER}|" \
-    -e "s|/opt/icinga2-splunk|${PREFIX}|g" \
-    -e "s|/etc/icinga2/splunk_config.json|${CONFIG_FILE}|g" \
+escape_sed() { printf '%s' "$1" | sed -e 's/[&|\\]/\\&/g'; }
+SED_USER="$(escape_sed "${SERVICE_USER}")"
+SED_PREFIX="$(escape_sed "${PREFIX}")"
+SED_CONFIG="$(escape_sed "${CONFIG_FILE}")"
+sed -e "s|^User=.*|User=${SED_USER}|" \
+    -e "s|^Group=.*|Group=${SED_USER}|" \
+    -e "s|/opt/icinga2-splunk|${SED_PREFIX}|g" \
+    -e "s|/etc/icinga2/splunk_config.json|${SED_CONFIG}|g" \
     "${SRC_DIR}/scripts/icinga2-splunk.service" > "${UNIT_FILE}"
 chmod 0644 "${UNIT_FILE}"
 systemctl daemon-reload

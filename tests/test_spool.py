@@ -191,15 +191,16 @@ def test_unwritable_directory(tmp_path: Path) -> None:
         DiskSpool(directory, max_bytes=100, max_age=10)
 
 
-def test_age_limit_stops_at_first_fresh_segment(make: Any, clock: Clock, tmp_path: Path) -> None:
+def test_age_limit_handles_out_of_order_mtimes(make: Any, clock: Clock, tmp_path: Path) -> None:
     spool = make(max_age=100, segment_max_bytes=1)
-    for name in ("old", "fresh", "current"):
+    for name in ("fresh", "old", "current"):
         spool.append(lines(name))
-    old, fresh, _current = segments(tmp_path)
-    os.utime(old, (clock.now - 200, clock.now - 200))
+    fresh, old, _current = segments(tmp_path)
     os.utime(fresh, (clock.now - 10, clock.now - 10))
+    os.utime(old, (clock.now - 200, clock.now - 200))
     spool.enforce_limits()
-    assert [p.exists() for p in (old, fresh)] == [False, True]
+    assert [p.exists() for p in (fresh, old)] == [True, False]
+    assert spool.dropped_count == 1
 
 
 def test_current_segment_deleted_externally(make: Any, tmp_path: Path) -> None:

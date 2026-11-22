@@ -43,8 +43,6 @@ logger = logging.getLogger(__name__)
 
 # HEC error codes in a 400 response that mean "this event is malformed".
 _BAD_EVENT_CODES = frozenset({6, 12, 13, 15, 16, 17, 18, 19, 20, 21})
-# HEC code 7: "Incorrect index" - the token may not write to that index.
-_INCORRECT_INDEX_CODE = 7
 _HTTP_BAD_REQUEST = 400
 _HTTP_TOO_LARGE = 413
 
@@ -103,6 +101,7 @@ class SplunkHECClient:
         self._next_attempt = 0.0
         self._last_report = 0.0
         self._last_limits_check = 0.0
+        self._spool_error = False
         # Spool segment being replayed: (path, lines, number already delivered).
         self._replay: tuple[Path, list[str], int] | None = None
 
@@ -121,6 +120,7 @@ class SplunkHECClient:
 
     def close(self, timeout: float | None = 30.0) -> None:
         """Stop the worker, try a last delivery and persist anything left over."""
+        deadline = None if timeout is None else self._clock() + timeout
         self._closed.set()
         with self._cond:
             self._cond.notify_all()
@@ -137,7 +137,7 @@ class SplunkHECClient:
             self._worker = None
 
         if not self.in_outage:
-            self._deliver_memory(stop_on_close=False)
+            self._deliver_memory(stop_on_close=False, deadline=deadline)
         if self.spool is not None:
             self._spill_memory()
             self.spool.close()
@@ -187,7 +187,7 @@ class SplunkHECClient:
                 envelope[key] = value
 
         try:
-            line = json.dumps(envelope, separators=(",", ":"), default=str)
+            line = json.dumps(envelope, separators=(",", ":"), default=str, allow_nan=False)
         except (TypeError, ValueError):
             logger.exception("Dropping event that cannot be serialized to JSON")
             return
@@ -238,7 +238,11 @@ class SplunkHECClient:
                 deadline = self._clock() + self.batch_timeout
                 if self.in_outage:
                     deadline = min(deadline, self._next_attempt)
-                while len(self._queue) < self.batch_size and not self._closed.is_set():
+                while not self._closed.is_set():
+                    if len(self._queue) >= self.batch_size and not (
+                        self.in_outage and (self.spool is None or self._spool_error)
+                    ):
+                        break
                     remaining = deadline - self._clock()
                     if remaining <= 0:
                         break
@@ -302,9 +306,11 @@ class SplunkHECClient:
                 self._spill_memory()
         return False
 
-    def _deliver_memory(self, *, stop_on_close: bool) -> bool:
-        """Send everything queued in memory. Returns False on outage."""
+    def _deliver_memory(self, *, stop_on_close: bool, deadline: float | None = None) -> bool:
+        """Send everything queued in memory. Returns False on outage or deadline."""
         while not (stop_on_close and self._closed.is_set()):
+            if deadline is not None and self._clock() >= deadline:
+                return False
             batch = self._take_batch()
             if not batch:
                 return True
@@ -326,41 +332,45 @@ class SplunkHECClient:
         below ``len(lines)`` means Splunk is unavailable and the remaining
         events must be kept.
         """
-        if not lines:
-            return 0
-        payload = "\n".join(lines).encode("utf-8")
-        try:
-            response = self._session.post(self.endpoint, data=payload, timeout=self.request_timeout)
-        except requests.RequestException as exc:
-            self._log_failure(len(lines), str(exc))
-            return 0
+        resolved = 0
+        while resolved < len(lines):
+            chunk = lines[resolved:]
+            payload = "\n".join(chunk).encode("utf-8")
+            try:
+                response = self._session.post(
+                    self.endpoint,
+                    data=payload,
+                    timeout=self.request_timeout,
+                    allow_redirects=False,
+                )
+            except requests.RequestException as exc:
+                self._log_failure(len(chunk), str(exc))
+                return resolved
 
-        if response.ok:
-            self.sent_count += len(lines)
-            logger.debug("Sent %d events to Splunk", len(lines))
-            return len(lines)
+            if response.ok:
+                self.sent_count += len(chunk)
+                logger.debug("Sent %d events to Splunk", len(chunk))
+                return resolved + len(chunk)
 
-        return self._handle_rejection(lines, response)
+            if response.status_code == _HTTP_BAD_REQUEST:
+                body = _json_body(response)
+                if body.get("code") in _BAD_EVENT_CODES:
+                    bad = body.get("invalid-event-number")
+                    if isinstance(bad, int) and not isinstance(bad, bool) and 0 <= bad < len(chunk):
+                        # HEC indexed the events before the invalid one.
+                        self.sent_count += bad
+                        self._discard(chunk[bad], response)
+                        resolved += bad + 1
+                        continue
+                    return resolved + self._bisect(chunk, response)
+            if response.status_code == _HTTP_TOO_LARGE:
+                return resolved + self._bisect(chunk, response)
 
-    def _handle_rejection(self, lines: list[str], response: requests.Response) -> int:
-        """Classify a non-2xx HEC response; see :meth:`_deliver`."""
-        body = _json_body(response)
-        code = body.get("code")
-        if response.status_code == _HTTP_BAD_REQUEST and code != _INCORRECT_INDEX_CODE:
-            bad = body.get("invalid-event-number")
-            if code in _BAD_EVENT_CODES and isinstance(bad, int) and 0 <= bad < len(lines):
-                # HEC indexed the events before the invalid one.
-                self.sent_count += bad
-                self._discard(lines[bad], response)
-                return bad + 1 + self._deliver(lines[bad + 1 :])
-            return self._bisect(lines, response)
-        if response.status_code == _HTTP_TOO_LARGE:
-            return self._bisect(lines, response)
-
-        self._log_failure(
-            len(lines), f"HTTP {response.status_code} - {response.text[:300]}", response
-        )
-        return 0
+            self._log_failure(
+                len(chunk), f"HTTP {response.status_code} - {response.text[:300]}", response
+            )
+            return resolved
+        return resolved
 
     def _bisect(self, lines: list[str], response: requests.Response) -> int:
         if len(lines) == 1:
@@ -373,7 +383,8 @@ class SplunkHECClient:
         return mid + self._deliver(lines[mid:])
 
     def _discard(self, line: str, response: requests.Response) -> None:
-        self.dropped_count += 1
+        with self._cond:
+            self.dropped_count += 1
         logger.error(
             "Splunk rejected an event as invalid and it was discarded: HTTP %s - %s; event: %.300s",
             response.status_code,
@@ -414,6 +425,7 @@ class SplunkHECClient:
             return
         duration = self._clock() - self._outage_since
         self._outage_since = None
+        self._spool_error = False
         self._backoff = self.retry_initial
         logger.info("Splunk available again after %.0f s; delivering buffered events", duration)
 
@@ -443,9 +455,11 @@ class SplunkHECClient:
             return lines
 
     def _requeue_front(self, lines: list[str]) -> None:
-        if self.spool is not None:
-            self.spool.append(lines)
+        if self.spool is not None and self._append_spool(lines):
             return
+        self._requeue_memory(lines)
+
+    def _requeue_memory(self, lines: list[str]) -> None:
         with self._cond:
             self._queue.extendleft(reversed(lines))
             while len(self._queue) > self._max_queue_size:
@@ -453,10 +467,22 @@ class SplunkHECClient:
                 self.dropped_count += 1
 
     def _spill_memory(self) -> None:
-        if self.spool is not None:
-            lines = self._take_all()
-            if lines:
-                self.spool.append(lines)
+        if self.spool is None:
+            return
+        lines = self._take_all()
+        if lines and not self._append_spool(lines):
+            self._requeue_memory(lines)
+
+    def _append_spool(self, lines: list[str]) -> bool:
+        assert self.spool is not None  # noqa: S101 - for type narrowing
+        try:
+            self.spool.append(lines)
+        except OSError as exc:
+            self._spool_error = True
+            logger.error("Failed to write %d events to disk spool: %s", len(lines), exc)  # noqa: TRY400
+            return False
+        self._spool_error = False
+        return True
 
 
 def _json_body(response: requests.Response) -> dict[str, Any]:

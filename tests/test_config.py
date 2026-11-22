@@ -117,6 +117,13 @@ def test_world_readable_file_warns(
     assert "world-readable" in caplog.text
 
 
+def test_world_writable_file_warns(
+    tmp_path: Path, base_settings: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    Config.load(write_config(tmp_path, base_settings, mode=0o602), environ={})
+    assert "world-readable/writable" in caplog.text
+
+
 @pytest.mark.parametrize("content", ["{not json", "[1, 2]"])
 def test_bad_file_content(tmp_path: Path, content: str) -> None:
     path = tmp_path / "c.json"
@@ -142,19 +149,25 @@ def test_auth_required(base_settings: dict[str, Any]) -> None:
     [
         ({"icinga2_api_url": "icinga:5665"}, "icinga2_api_url must be"),
         ({"splunk_hec_url": "ftp://x"}, "splunk_hec_url must be"),
+        ({"icinga2_api_url": "https://user:pass@icinga:5665"}, "embedded credentials"),
+        ({"splunk_hec_url": "https://user@splunk:8088"}, "embedded credentials"),
         ({"batch_size": 0}, "batch_size"),
         ({"batch_size": True}, "batch_size"),
         ({"max_queue_size": "10"}, "max_queue_size"),
         ({"retry_max_interval": 0.5}, "retry_max_interval"),
+        ({"retry_max_interval": float("inf")}, "retry_max_interval"),
         ({"spool_dir": "relative/path"}, "spool_dir"),
         ({"spool_dir": 5}, "spool_dir"),
         ({"spool_max_size_mb": 0}, "spool_max_size_mb"),
+        ({"spool_max_size_mb": float("inf")}, "spool_max_size_mb"),
         ({"spool_max_age_days": -1}, "spool_max_age_days"),
         ({"batch_timeout": 0}, "batch_timeout"),
         ({"heartbeat_timeout": "x"}, "heartbeat_timeout"),
         ({"include_perfdata": "yes"}, "include_perfdata"),
         ({"include_check_results": 1}, "include_check_results"),
         ({"splunk_verify_ssl": 1}, "splunk_verify_ssl"),
+        ({"splunk_verify_ssl": ""}, "splunk_verify_ssl"),
+        ({"icinga2_api_verify_ssl": "   "}, "icinga2_api_verify_ssl"),
         ({"event_types": "StateChange"}, "event_types"),
         ({"check_result_state_filter": ["2"]}, "check_result_state_filter"),
         ({"log_level": "LOUD"}, "log_level"),
