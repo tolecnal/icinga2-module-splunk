@@ -786,3 +786,11 @@ def test_segment_dropped_mid_replay_is_not_resent(tmp_path: Path) -> None:
     fake.handler = lambda _e: response(200, OK)
     assert client.flush() is True
     assert fake.received == [0, 1]
+
+
+def test_local_oserror_is_an_outage_not_a_crash() -> None:
+    client, _ = make_client(FakeSplunk(lambda _e: OSError("invalid CA bundle path")))
+    client.send(1)
+    assert client.flush() is False
+    assert client.in_outage
+    assert client.pending == 1

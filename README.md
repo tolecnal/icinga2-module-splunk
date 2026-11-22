@@ -77,15 +77,28 @@ The package differs from the script install below:
 The service isn't enabled on install because it needs configuring first. Once you
 enable it, package upgrades restart it. `apt purge` also deletes the disk spool.
 
+**Switching from a script install?** Stop the service, then remove
+`/etc/systemd/system/icinga2-splunk.service` and run `systemctl daemon-reload`.
+Otherwise that unit overrides the packaged one, and runs the old code with a read-only
+spool directory. Also remove `/opt/icinga2-splunk` (or `/usr/local/bin/icinga2_splunk`
+from 1.x). Move your settings from `/etc/icinga2/splunk_config.json` to
+`/etc/icinga2-splunk/splunk_config.json`, then delete the old file. The package warns
+if it finds the old unit.
+
 Because the service runs as its own user, it can't read Icinga2's private
-`/var/lib/icinga2/certs` directory. Copy the CA certificate (and any client
-certificate) somewhere it can read, for example:
+`/var/lib/icinga2/certs` directory. When the package is installed on an Icinga2 host,
+it copies the (public) CA certificate to `/etc/icinga2-splunk/icinga2-ca.crt`, and
+the packaged config uses that path. If Icinga2 is installed later, or its CA changes,
+copy it yourself:
 
 ```bash
-sudo install -m 0644 /var/lib/icinga2/certs/ca.crt /etc/icinga2-splunk/ca.crt
+sudo install -m 0644 /var/lib/icinga2/certs/ca.crt /etc/icinga2-splunk/icinga2-ca.crt
 ```
 
-Then set `"icinga2_api_verify_ssl": "/etc/icinga2-splunk/ca.crt"`.
+A client certificate and key for the Icinga2 API also need to be readable by the
+`icinga2-splunk` user (key mode `0640`, group `icinga2-splunk`). If a configured
+certificate file can't be read, the service and `icinga2-splunk-check` say which file
+and exit (the service with code 78, so systemd doesn't keep restarting it).
 
 ### Script install (any distribution)
 

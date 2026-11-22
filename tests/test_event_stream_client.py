@@ -597,3 +597,42 @@ def test_run_reconnects_immediately_after_idle_timeout(make_config, splunk, capl
     assert calls["n"] == 2
     assert waits == []
     assert "disconnected" not in caplog.text
+
+
+def test_main_unreadable_ca_exits_with_config_error(tmp_path, base_settings, caplog) -> None:
+    path = tmp_path / "c.json"
+    path.write_text(json.dumps({**base_settings, "icinga2_api_verify_ssl": str(tmp_path / "no")}))
+    path.chmod(0o600)
+    assert esc.main(["-c", str(path)]) == esc.EXIT_CONFIG_ERROR
+    assert "is not a file readable by user" in caplog.text
+
+
+def test_consume_local_oserror_does_not_crash(make_config, splunk, caplog) -> None:
+    error = OSError("Could not find a suitable TLS CA certificate bundle, invalid path: /x")
+    client, _ = make_stream_client(make_config, splunk, error)
+    assert client._consume() is False
+    assert "Event stream connection failed" in caplog.text
+
+
+# ------------------------------------------------------------ TLS warnings
+
+
+@pytest.mark.parametrize(
+    ("overrides", "silenced"),
+    [
+        ({}, False),
+        ({"splunk_verify_ssl": "/ca.pem"}, False),
+        ({"splunk_verify_ssl": False}, True),
+        ({"icinga2_api_verify_ssl": False}, True),
+    ],
+)
+def test_insecure_request_warnings(make_config, overrides, silenced) -> None:
+    import warnings
+
+    from urllib3.exceptions import InsecureRequestWarning
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        esc.silence_insecure_request_warnings(make_config(**overrides))
+        warnings.warn("unverified", InsecureRequestWarning, stacklevel=1)
+    assert (len(caught) == 0) is silenced

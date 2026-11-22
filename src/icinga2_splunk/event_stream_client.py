@@ -15,12 +15,13 @@ import signal
 import sys
 import threading
 import time
+import warnings
 from collections.abc import Callable, Iterator, Mapping
 from types import FrameType
 from typing import Any
 
 import requests
-from urllib3.exceptions import ReadTimeoutError
+from urllib3.exceptions import InsecureRequestWarning, ReadTimeoutError
 
 from icinga2_splunk import __version__
 from icinga2_splunk.config import Config, ConfigError
@@ -93,6 +94,16 @@ def _iter_bounded_lines(
             buf.extend(tail)
     if buf and not dropping:
         yield bytes(buf).rstrip(b"\r")
+
+
+def silence_insecure_request_warnings(config: Config) -> None:
+    """Stop urllib3 warning on every request when TLS verification is disabled.
+
+    Config validation already logs one warning at startup; urllib3's warning
+    only fires for unverified requests, so nothing else is hidden.
+    """
+    if config.icinga2_api_verify_ssl is False or config.splunk_verify_ssl is False:
+        warnings.filterwarnings("ignore", category=InsecureRequestWarning)
 
 
 def _is_read_timeout(exc: requests.RequestException) -> bool:
@@ -283,8 +294,12 @@ class EventStreamClient:
                             self._process_line(line)
                     else:
                         logger.warning("Event stream closed by Icinga2")
-            except requests.RequestException as exc:
-                if connected and _is_read_timeout(exc):
+            except OSError as exc:
+                # requests.RequestException is an OSError; plain OSErrors come
+                # from local problems such as an unreadable CA bundle.
+                if not isinstance(exc, requests.RequestException):
+                    logger.error("Event stream connection failed: %s", exc)  # noqa: TRY400
+                elif connected and _is_read_timeout(exc):
                     self._idle_timeout = True
                     logger.info(
                         "No data from Icinga2 for %g s (heartbeat_timeout); reconnecting",
@@ -551,6 +566,12 @@ def main(argv: list[str] | None = None) -> int:
         logger.critical("%s", exc)
         return EXIT_CONFIG_ERROR
     logging.getLogger().setLevel(config.log_level)
+    silence_insecure_request_warnings(config)
+    file_errors = config.file_errors()
+    for error in file_errors:
+        logger.critical("%s", error)
+    if file_errors:
+        return EXIT_CONFIG_ERROR
 
     try:
         client = EventStreamClient(config)

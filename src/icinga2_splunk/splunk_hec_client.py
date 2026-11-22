@@ -363,7 +363,7 @@ class SplunkHECClient:
                     timeout=self.request_timeout,
                     allow_redirects=False,
                 )
-            except requests.RequestException as exc:
+            except OSError as exc:  # RequestException, or e.g. an unreadable CA bundle
                 self._log_failure(len(chunk), str(exc))
                 return resolved
 

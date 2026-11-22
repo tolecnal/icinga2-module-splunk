@@ -3,6 +3,8 @@ set -e
 
 USER=icinga2-splunk
 CONFIG=/etc/icinga2-splunk/splunk_config.json
+ICINGA2_CA=/var/lib/icinga2/certs/ca.crt
+LOCAL_CA=/etc/icinga2-splunk/icinga2-ca.crt
 
 if [ "$1" = configure ]; then
     if ! getent passwd "$USER" >/dev/null; then
@@ -20,6 +22,23 @@ if [ "$1" = configure ]; then
     if [ -f "$CONFIG" ] && ! dpkg-statoverride --list "$CONFIG" >/dev/null; then
         chown root:"$USER" "$CONFIG"
         chmod 0640 "$CONFIG"
+    fi
+
+    # The service user can't read Icinga2's private certs directory, so keep a
+    # copy of the (public) CA certificate where it can.
+    if [ -f "$ICINGA2_CA" ] && [ ! -e "$LOCAL_CA" ]; then
+        install -m 0644 "$ICINGA2_CA" "$LOCAL_CA"
+        echo "icinga2-splunk: copied the Icinga2 CA certificate to $LOCAL_CA"
+    fi
+
+    # A unit from a script install (scripts/install.sh, or 1.x) in /etc takes
+    # precedence over the packaged one and runs the old code and settings.
+    OVERRIDE=/etc/systemd/system/icinga2-splunk.service
+    if [ -f "$OVERRIDE" ] && ! grep -q '^ExecStart=/usr/bin/icinga2-splunk$' "$OVERRIDE"; then
+        echo "icinga2-splunk: WARNING: $OVERRIDE overrides the packaged service." >&2
+        echo "  It is probably left over from a script install. Remove it, run" >&2
+        echo "  'systemctl daemon-reload', and remove the old code" >&2
+        echo "  (/opt/icinga2-splunk or /usr/local/bin/icinga2_splunk)." >&2
     fi
 
     if [ -z "$2" ]; then

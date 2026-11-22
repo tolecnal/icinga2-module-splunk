@@ -25,7 +25,11 @@ override_dh_auto_install:
 	install -m 0644 src/icinga2_splunk/*.py src/icinga2_splunk/py.typed $(PYDIR)/
 	install -D -m 0755 debian/scripts/icinga2-splunk $(DESTDIR)/usr/bin/icinga2-splunk
 	install -D -m 0755 debian/scripts/icinga2-splunk-check $(DESTDIR)/usr/bin/icinga2-splunk-check
-	install -D -m 0644 config.json.example $(DESTDIR)/etc/icinga2-splunk/splunk_config.json
+	# The service user can't read /var/lib/icinga2/certs; postinst copies the
+	# Icinga2 CA next to the config instead.
+	install -d $(DESTDIR)/etc/icinga2-splunk
+	sed 's|/var/lib/icinga2/certs/ca.crt|/etc/icinga2-splunk/icinga2-ca.crt|' \
+		config.json.example > $(DESTDIR)/etc/icinga2-splunk/splunk_config.json
 
 override_dh_installsystemd:
 	# Not enabled on install: the service needs configuring first. Once enabled
