@@ -83,6 +83,14 @@ jobs:
           pattern: deb-*
           path: out
           merge-multiple: true
+      - name: Make file names safe for GitHub
+        # GitHub turns "~" in asset names into ".", so "2.0.0~deb12" would be
+        # published as "2.0.0.deb12". Use "_" instead; the package version
+        # inside the .deb keeps the "~".
+        run: |
+          for deb in out/*.deb; do
+            mv -v "$deb" "${deb//\~/_}"
+          done
       - name: Create or update the release
         env:
           GH_TOKEN: ${{ github.token }}
