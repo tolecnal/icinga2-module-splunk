@@ -425,10 +425,31 @@ def test_close_flushes_splunk(client, splunk) -> None:
     assert splunk.closed
 
 
-def test_default_splunk_client_built_from_config(make_config) -> None:
-    client = EventStreamClient(make_config(batch_size=7, splunk_verify_ssl="/ca.pem"))
-    assert client.splunk.batch_size == 7
-    assert client.splunk.endpoint == "https://splunk.example.com:8088/services/collector/event"
+def test_default_splunk_client_built_from_config(make_config, tmp_path) -> None:
+    client = EventStreamClient(
+        make_config(
+            batch_size=7,
+            splunk_verify_ssl="/ca.pem",
+            spool_dir=str(tmp_path / "spool"),
+            spool_max_size_mb=2,
+            spool_max_age_days=1,
+            retry_max_interval=30,
+        )
+    )
+    splunk = client.splunk
+    assert splunk.batch_size == 7
+    assert splunk.endpoint == "https://splunk.example.com:8088/services/collector/event"
+    assert splunk.retry_max == 30
+    assert splunk.spool is not None
+    assert splunk.spool.max_bytes == 2 * 1_048_576
+    assert splunk.spool.max_age == 86_400
+    splunk.spool.close()
+
+
+def test_memory_only_without_spool_dir(make_config, caplog) -> None:
+    client = EventStreamClient(make_config(spool_dir=""))
+    assert client.splunk.spool is None
+    assert "only buffered in memory" in caplog.text
 
 
 # ------------------------------------------------------------------------ main
@@ -460,3 +481,15 @@ def test_main_runs_and_flushes_on_signal(tmp_path, base_settings, monkeypatch) -
         for sig, handler in original.items():
             signal.signal(sig, handler)
     instances[0].close.assert_called_once()
+
+
+def test_main_unwritable_spool(tmp_path, base_settings, monkeypatch) -> None:
+    path = tmp_path / "c.json"
+    path.write_text(json.dumps(base_settings))
+    path.chmod(0o600)
+
+    def boom(_config):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(esc, "EventStreamClient", boom)
+    assert esc.main(["-c", str(path)]) == esc.EXIT_CONFIG_ERROR

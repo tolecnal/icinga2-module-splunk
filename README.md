@@ -12,8 +12,10 @@ and the Splunk HTTP Event Collector (HEC).
   CheckResults. Any other subscribed type (e.g. `ObjectCreated`) is forwarded as is.
 - **Performance data**: each metric becomes its own event, with thresholds, in a
   separate index. Nagios range thresholds (`10:20`, `@0:5`, `~:10`) are kept as strings.
-- **Reliable delivery**: batching, retries with exponential backoff on HTTP 429/5xx and
-  connection errors, a bounded in-memory queue, and a flush on shutdown (SIGTERM).
+- **Survives Splunk outages**: while Splunk is unreachable, events are written to a
+  disk spool limited by age (default 7 days) and size (default 1 GB). The spool is
+  replayed, oldest first, once Splunk is reachable again, including after a restart.
+  See [Delivery and outages](#delivery-and-outages).
 - **Self-healing connection**: dead streams are detected with a read timeout
   (`heartbeat_timeout`), and reconnects use exponential backoff (1 s up to 60 s).
 - **Secure defaults**: TLS verification is on and can point at the Icinga2 CA. Check
@@ -27,7 +29,8 @@ Icinga2 API (/v1/events, chunked JSON stream)
         │
 EventStreamClient ── converts events, parses perfdata
         │
-SplunkHECClient ──── bounded queue → batches → /services/collector/event
+SplunkHECClient ──── memory queue → batches → /services/collector/event
+        │                └── disk spool (/var/lib/icinga2-splunk/spool) during outages
         │
 Splunk
  ├── icinga2_events    (state changes, notifications, acks, comments, downtimes)
@@ -156,12 +159,51 @@ Set `ICINGA2_SPLUNK_CONFIG` or pass `--config` to use a different file.
 | `splunk_index_perfdata` | `SPLUNK_INDEX_PERFDATA` | `icinga2_perfdata` |                                               |
 | `batch_size`            | `BATCH_SIZE`            | `100`              | Events per HEC request                        |
 | `batch_timeout`         | `BATCH_TIMEOUT`         | `10`               | Maximum seconds before a partial batch is sent |
-| `max_queue_size`        | `MAX_QUEUE_SIZE`        | `10000`            | Oldest events are dropped beyond this         |
-| `max_retries`           | `MAX_RETRIES`           | `3`                | Retries for HTTP 429/5xx and network errors   |
+| `max_queue_size`        | `MAX_QUEUE_SIZE`        | `10000`            | Events held in memory (see below)             |
+| `retry_max_interval`    | `RETRY_MAX_INTERVAL`    | `60`               | Maximum seconds between retries during an outage |
 | `log_level`             | `LOG_LEVEL`             | `INFO`             | `DEBUG`, `INFO`, `WARNING`, `ERROR`           |
+
+### Spool
+
+| Option               | Env variable         | Default                         | Description                                 |
+| -------------------- | -------------------- | ------------------------------- | ------------------------------------------- |
+| `spool_dir`          | `SPOOL_DIR`          | `/var/lib/icinga2-splunk/spool` | Absolute path; `""` disables the disk spool |
+| `spool_max_size_mb`  | `SPOOL_MAX_SIZE_MB`  | `1024`                          | Oldest events are discarded beyond this     |
+| `spool_max_age_days` | `SPOOL_MAX_AGE_DAYS` | `7`                             | Spooled events older than this are discarded |
+
+The systemd unit creates the default spool directory (`StateDirectory=`). If you run the
+service another way, make sure the directory is writable by the service user. If it
+isn't, the service exits with code 78.
 
 A `splunk_hec_url` that ends in `/services/collector` or `/services/collector/event` is
 also accepted.
+
+## Delivery and outages
+
+The client sorts every HEC response into one of three groups:
+
+| Response                                                                 | Meaning           | Action                                                                                         |
+| ------------------------------------------------------------------------ | ----------------- | ---------------------------------------------------------------------------------------------- |
+| 2xx                                                                      | Delivered         | –                                                                                              |
+| 400 for a malformed event, 413 too large                                 | Bad data          | Only the offending event is discarded and logged. The batch is split to find it if needed.    |
+| Connection error, timeout, 429, 5xx, 401, 403, 404, 400 "Incorrect index" | Splunk unavailable | Nothing is discarded. Events go to the spool, and delivery is retried with backoff from 1 s up to `retry_max_interval`. |
+
+Authentication and index errors count as "unavailable" rather than "bad data". They
+are usually configuration problems an admin can fix, and the events should survive
+until then. They are logged at ERROR level.
+
+When Splunk is reachable again, the spool is replayed oldest first, then live events
+follow. During replay, new events are moved to the spool so memory stays bounded.
+Delivery is at-least-once: if the process crashes during replay, part of a segment may
+be sent twice.
+
+Events are discarded only when:
+
+- the spool exceeds `spool_max_size_mb` or `spool_max_age_days` (oldest first, logged
+  at ERROR level),
+- the spool is disabled (`spool_dir: ""`) and more than `max_queue_size` events are
+  waiting in memory, or the service stops during an outage,
+- Splunk rejects a single event as malformed.
 
 ## Splunk events
 
@@ -200,6 +242,8 @@ index=icinga2_perfdata host=web1 metric=rta
 - `previous_state` now holds the real previous state (it was always `0`).
 - The check `command` field is no longer included in CheckResult events, because
   command lines often contain credentials.
+- `max_retries` was removed. Delivery now retries until the spool limits are reached.
+  The key is ignored with a warning.
 - The deprecated keys `event_stream_types`, `splunk_batch_size` and
   `splunk_batch_interval` are still accepted and log a warning.
 
@@ -218,3 +262,7 @@ builds and smoke-tests the wheel and runs `pip-audit`.
 
 The `icinga2_config/features-available/splunk.conf` file is an unrelated alternative
 setup. It writes perfdata files that a Splunk Universal Forwarder can monitor.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE).

@@ -1,57 +1,125 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 from unittest import mock
 
 import pytest
 import requests
 
+from icinga2_splunk import splunk_hec_client as hec
 from icinga2_splunk.splunk_hec_client import SplunkHECClient
+from icinga2_splunk.spool import DiskSpool
 
 
-def response(status: int, text: str = "") -> mock.Mock:
+def response(status: int, body: dict[str, Any] | None = None) -> mock.Mock:
     resp = mock.Mock(spec=requests.Response)
     resp.status_code = status
     resp.ok = 200 <= status < 400
-    resp.text = text
+    resp.text = json.dumps(body) if body is not None else ""
+    if body is None:
+        resp.json.side_effect = ValueError("no json")
+    else:
+        resp.json.return_value = body
     return resp
 
 
-def make_client(*responses: Any, **kwargs: Any) -> tuple[SplunkHECClient, mock.Mock]:
-    session = mock.Mock(spec=requests.Session)
-    session.headers = {}
-    session.post.side_effect = list(responses) if responses else None
-    if not responses:
-        session.post.return_value = response(200)
-    kwargs.setdefault("retry_backoff", 0)
+OK = {"text": "Success", "code": 0}
+Handler = Callable[[list[dict[str, Any]]], Any]
+
+
+class FakeSplunk:
+    """Fake requests.Session; ``handler`` maps the posted events to a response."""
+
+    def __init__(self, handler: Handler | None = None) -> None:
+        self.headers: dict[str, str] = {}
+        self.verify: Any = True
+        self.handler: Handler = handler or (lambda _events: response(200, OK))
+        self.posts: list[list[dict[str, Any]]] = []
+        self.received: list[Any] = []
+        self.closed = False
+        self.lock = threading.Lock()
+
+    def post(self, url: str, data: bytes, timeout: float) -> Any:
+        events = [json.loads(line) for line in data.decode().splitlines()]
+        with self.lock:
+            self.posts.append(events)
+        result = self.handler(events)
+        if isinstance(result, Exception):
+            raise result
+        if result.ok:
+            with self.lock:
+                self.received.extend(e["event"] for e in events)
+        return result
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def down(_events: list[dict[str, Any]]) -> Exception:
+    return requests.ConnectionError("connection refused")
+
+
+def make_client(
+    fake: FakeSplunk | None = None, **kwargs: Any
+) -> tuple[SplunkHECClient, FakeSplunk]:
+    fake = fake or FakeSplunk()
     client = SplunkHECClient(
-        "https://splunk:8088/services/collector", "tok", session=session, **kwargs
+        "https://splunk:8088/services/collector",
+        "tok",
+        session=fake,  # type: ignore[arg-type]
+        **kwargs,
     )
-    return client, session
+    return client, fake
 
 
-def posted_events(session: mock.Mock, call: int = 0) -> list[dict[str, Any]]:
-    payload = session.post.call_args_list[call].kwargs["data"].decode()
-    return [json.loads(line) for line in payload.splitlines()]
+_open_spools: list[DiskSpool] = []
+
+
+def make_spool(tmp_path: Path, **kwargs: Any) -> DiskSpool:
+    kwargs.setdefault("max_bytes", 10 * 1024 * 1024)
+    kwargs.setdefault("max_age", 86400)
+    spool = DiskSpool(tmp_path / "spool", **kwargs)
+    _open_spools.append(spool)
+    return spool
+
+
+@pytest.fixture(autouse=True)
+def _close_spools() -> Any:
+    yield
+    while _open_spools:
+        _open_spools.pop().close()
+
+
+# ------------------------------------------------------------------- basics
 
 
 def test_session_setup() -> None:
-    client, session = make_client(verify="/ca.pem")
+    client, fake = make_client(verify="/ca.pem")
     assert client.endpoint == "https://splunk:8088/services/collector/event"
-    assert session.headers["Authorization"] == "Splunk tok"
-    assert session.verify == "/ca.pem"
+    assert fake.headers["Authorization"] == "Splunk tok"
+    assert fake.verify == "/ca.pem"
 
 
 def test_envelope_omits_none_fields() -> None:
-    client, session = make_client()
+    client, fake = make_client()
     client.send({"a": 1}, sourcetype="st", index="idx", timestamp=12.5)
     client.send({"b": 2})
-    client.flush()
-
-    assert posted_events(session) == [
+    assert client.flush() is True
+    assert fake.posts[0] == [
         {"event": {"a": 1}, "time": 12.5, "sourcetype": "st", "index": "idx"},
         {"event": {"b": 2}},
     ]
@@ -60,19 +128,18 @@ def test_envelope_omits_none_fields() -> None:
 
 
 def test_flush_splits_into_batches() -> None:
-    client, session = make_client(batch_size=2)
+    client, fake = make_client(batch_size=2)
     for i in range(5):
         client.send(i)
     client.flush()
-    assert session.post.call_count == 3
-    assert [len(posted_events(session, i)) for i in range(3)] == [2, 2, 1]
+    assert [len(p) for p in fake.posts] == [2, 2, 1]
 
 
 def test_non_serializable_values_are_stringified() -> None:
-    client, session = make_client()
+    client, fake = make_client()
     client.send({"when": object.__new__(type("X", (), {"__str__": lambda self: "x"}))})
     client.flush()
-    assert posted_events(session)[0]["event"] == {"when": "x"}
+    assert fake.received == [{"when": "x"}]
 
 
 def test_circular_event_is_dropped(caplog: pytest.LogCaptureFixture) -> None:
@@ -84,101 +151,375 @@ def test_circular_event_is_dropped(caplog: pytest.LogCaptureFixture) -> None:
     assert "cannot be serialized" in caplog.text
 
 
-def test_queue_bound_drops_oldest(caplog: pytest.LogCaptureFixture) -> None:
-    client, session = make_client(max_queue_size=3, batch_size=10)
+def test_memory_queue_bound_drops_oldest(caplog: pytest.LogCaptureFixture) -> None:
+    client, fake = make_client(max_queue_size=3, batch_size=10)
     for i in range(5):
         client.send(i)
     assert client.dropped_count == 2
     client.flush()
-    assert [e["event"] for e in posted_events(session)] == [2, 3, 4]
+    assert fake.received == [2, 3, 4]
     assert "queue full" in caplog.text
 
 
-def test_retry_on_transient_errors() -> None:
-    client, session = make_client(
-        requests.ConnectionError("boom"), response(503, "busy"), response(200), max_retries=3
-    )
-    client.send(1)
-    client.flush()
-    assert session.post.call_count == 3
-    assert client.sent_count == 1
+# ------------------------------------------------------------ bad payloads
+
+
+def test_invalid_event_number_skips_only_that_event(caplog: pytest.LogCaptureFixture) -> None:
+    def handler(events: list[dict[str, Any]]) -> Any:
+        for i, e in enumerate(events):
+            if e["event"] == "BAD":
+                # HEC indexes events before the bad one, then stops.
+                return response(
+                    400, {"text": "Invalid data format", "code": 6, "invalid-event-number": i}
+                )
+        return response(200, OK)
+
+    accepted: list[Any] = []
+    fake = FakeSplunk(handler)
+    client, _ = make_client(fake)
+    original_post = fake.post
+
+    def post(url: str, data: bytes, timeout: float) -> Any:
+        result = original_post(url, data, timeout)
+        if not result.ok:
+            events = [json.loads(line)["event"] for line in data.decode().splitlines()]
+            accepted.extend(events[: json.loads(result.text)["invalid-event-number"]])
+        return result
+
+    fake.post = post  # type: ignore[method-assign]
+    for e in [1, 2, "BAD", 3, "BAD", 4]:
+        client.send(e)
+    assert client.flush() is True
+    assert accepted + fake.received == [1, 2, 3, 4]
+    assert client.sent_count == 4
+    assert client.dropped_count == 2
+    assert "discarded" in caplog.text
+
+
+def test_bad_request_without_event_number_bisects() -> None:
+    def handler(events: list[dict[str, Any]]) -> Any:
+        if any(e["event"] == "BAD" for e in events):
+            return response(400, {"text": "Invalid data format", "code": 6})
+        return response(200, OK)
+
+    client, fake = make_client(FakeSplunk(handler), batch_size=8)
+    for e in [0, 1, 2, "BAD", 4, 5, 6, 7]:
+        client.send(e)
+    assert client.flush() is True
+    assert fake.received == [0, 1, 2, 4, 5, 6, 7]
+    assert client.dropped_count == 1
+
+
+def test_payload_too_large_is_split() -> None:
+    def handler(events: list[dict[str, Any]]) -> Any:
+        return response(413) if len(events) > 2 else response(200, OK)
+
+    client, fake = make_client(FakeSplunk(handler), batch_size=8)
+    for i in range(8):
+        client.send(i)
+    assert client.flush() is True
+    assert fake.received == list(range(8))
     assert client.dropped_count == 0
 
 
-def test_gives_up_after_max_retries(caplog: pytest.LogCaptureFixture) -> None:
-    client, session = make_client(*[response(500)] * 3, max_retries=2)
-    client.send(1)
-    client.flush()
-    assert session.post.call_count == 3
+def test_single_oversized_event_is_discarded() -> None:
+    client, _ = make_client(FakeSplunk(lambda _e: response(413)))
+    client.send("huge")
+    assert client.flush() is True
     assert client.dropped_count == 1
-    assert "Dropped 1 events" in caplog.text
 
 
-def test_no_retry_on_client_error() -> None:
-    client, session = make_client(response(403, '{"text":"Invalid token","code":4}'))
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (400, {"text": "Incorrect index", "code": 7, "invalid-event-number": 0}),
+        (401, {"text": "Token is required", "code": 2}),
+        (403, {"text": "Invalid token", "code": 4}),
+        (404, None),
+        (429, None),
+        (500, None),
+        (503, {"text": "Server is busy", "code": 9}),
+    ],
+)
+def test_unavailable_responses_keep_events(status: int, body: Any) -> None:
+    fake = FakeSplunk(lambda _e: response(status, body))
+    client, _ = make_client(fake)
+    client.send(1)
+    client.send(2)
+    assert client.flush() is False
+    assert client.in_outage
+    assert client.dropped_count == 0
+    assert client.pending == 2
+
+    fake.handler = lambda _e: response(200, OK)
+    assert client.flush() is True
+    assert fake.received == [1, 2]
+
+
+def test_partial_bisect_failure_keeps_remainder() -> None:
+    calls = {"n": 0}
+
+    def handler(events: list[dict[str, Any]]) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return response(413)
+        if calls["n"] == 2:
+            return response(200, OK)  # first half accepted
+        return requests.ConnectionError("gone")  # then Splunk goes away
+
+    client, fake = make_client(FakeSplunk(handler), batch_size=4)
+    for i in range(4):
+        client.send(i)
+    assert client.flush() is False
+    assert fake.received == [0, 1]
+    assert client.pending == 2  # only the undelivered half is kept
+
+
+# ------------------------------------------------------------ outage logic
+
+
+def test_backoff_doubles_and_is_capped(caplog: pytest.LogCaptureFixture) -> None:
+    clock = Clock()
+    client, _ = make_client(FakeSplunk(down), clock=clock, retry_initial=1.0, retry_max=8.0)
+    client.send(1)
+    waits = []
+    for _ in range(6):
+        clock.now = client._next_attempt
+        client._cycle()
+        waits.append(client._next_attempt - clock.now)
+    assert waits == [1.0, 2.0, 4.0, 8.0, 8.0, 8.0]
+    assert caplog.text.count("Splunk unavailable") == 1
+
+
+def test_no_requests_before_next_attempt() -> None:
+    clock = Clock()
+    client, fake = make_client(FakeSplunk(down), clock=clock, retry_initial=10.0)
+    client.send(1)
+    client._cycle()
+    posts = len(fake.posts)
+    clock.now += 5
+    client.send(2)
+    client._cycle()
+    assert len(fake.posts) == posts
+
+
+def test_recovery_logs_and_resets_backoff(caplog: pytest.LogCaptureFixture) -> None:
+    clock = Clock()
+    fake = FakeSplunk(down)
+    client, _ = make_client(fake, clock=clock, retry_initial=1.0)
+    client.send(1)
+    client._cycle()
+    clock.now = client._next_attempt
+    client._cycle()
+    fake.handler = lambda _e: response(200, OK)
+    clock.now = client._next_attempt
+    with caplog.at_level(logging.INFO):
+        client._cycle()
+    assert not client.in_outage
+    assert fake.received == [1]
+    assert "available again" in caplog.text
+    assert client._backoff == 1.0
+
+
+def test_outage_status_report(caplog: pytest.LogCaptureFixture, tmp_path: Path) -> None:
+    clock = Clock()
+    client, _ = make_client(
+        FakeSplunk(down), clock=clock, retry_initial=1000.0, spool=make_spool(tmp_path)
+    )
+    client.send(1)
+    client._cycle()
+    clock.now += hec.OUTAGE_REPORT_INTERVAL + 1
+    client._cycle()
+    assert "still unavailable" in caplog.text
+    assert "MB spooled" in caplog.text
+
+
+def test_auth_failure_logged_as_error(caplog: pytest.LogCaptureFixture) -> None:
+    client, _ = make_client(FakeSplunk(lambda _e: response(403, {"code": 4})))
     client.send(1)
     client.flush()
-    assert session.post.call_count == 1
-    assert client.dropped_count == 1
+    assert any(r.levelno == logging.ERROR for r in caplog.records)
+
+
+def test_repeated_failures_logged_quietly(caplog: pytest.LogCaptureFixture) -> None:
+    client, _ = make_client(FakeSplunk(down))
+    client.send(1)
+    client.flush()
+    client.flush()
+    assert caplog.text.count("Could not deliver") == 1
+
+
+# ------------------------------------------------------------- disk spool
+
+
+def test_outage_spills_to_disk_and_replays_in_order(tmp_path: Path) -> None:
+    clock = Clock()
+    spool = make_spool(tmp_path)
+    fake = FakeSplunk(down)
+    client, _ = make_client(fake, clock=clock, spool=spool, batch_size=3)
+    for i in range(5):
+        client.send(i)
+    client._cycle()
+    assert client.pending == 0
+    assert spool.size_bytes > 0
+
+    # More events arrive during the outage; they are spooled as well.
+    client.send(5)
+    clock.now += 0.1
+    client._cycle()
+    assert client.pending == 0
+
+    fake.handler = lambda _e: response(200, OK)
+    client.send(6)
+    clock.now = client._next_attempt
+    client._cycle()
+    assert fake.received == list(range(7))
+    assert not spool
+    assert not list((tmp_path / "spool").glob("*.jsonl"))
+
+
+def test_spool_survives_restart(tmp_path: Path) -> None:
+    client, _ = make_client(FakeSplunk(down), spool=make_spool(tmp_path))
+    for i in range(3):
+        client.send(i)
+    client.close()
+    assert client.dropped_count == 0
+
+    client2, fake2 = make_client(spool=make_spool(tmp_path))
+    client2.send("new")
+    assert client2.flush() is True
+    assert fake2.received == [0, 1, 2, "new"]
+
+
+def test_close_when_healthy_delivers(tmp_path: Path) -> None:
+    client, fake = make_client(spool=make_spool(tmp_path), batch_timeout=60)
+    client.start()
+    client.send(1)
+    client.close(timeout=5)
+    assert fake.received == [1]
+    assert fake.closed
+
+
+def test_close_without_spool_during_outage_counts_loss(caplog: pytest.LogCaptureFixture) -> None:
+    client, _ = make_client(FakeSplunk(down))
+    client.send(1)
+    client.flush()
+    client.send(2)
+    client.close()
+    assert client.dropped_count == 2
+    assert "no spool configured" in caplog.text
+
+
+def test_close_with_stuck_worker(caplog: pytest.LogCaptureFixture) -> None:
+    release = threading.Event()
+
+    def handler(_events: list[dict[str, Any]]) -> Any:
+        release.wait(5)
+        return response(200, OK)
+
+    client, _ = make_client(FakeSplunk(handler), batch_size=1)
+    client.start()
+    client.send(1)
+    time.sleep(0.05)
+    client.close(timeout=0.05)
+    release.set()
+    assert "did not stop in time" in caplog.text
+
+
+def test_replay_keeps_memory_bounded(tmp_path: Path) -> None:
+    spool = make_spool(tmp_path)
+    for i in range(10):
+        spool.append([json.dumps({"event": i})])
+    spool.close()
+
+    fake = FakeSplunk()
+    client, _ = make_client(fake, spool=spool, batch_size=1, max_queue_size=4)
+
+    def handler(_events: list[dict[str, Any]]) -> Any:
+        if len(fake.posts) <= 10:
+            client.send("live")  # live events keep arriving during replay
+        return response(200, OK)
+
+    fake.handler = handler
+    assert client.flush() is True
+    assert client.dropped_count == 0
+    assert [e for e in fake.received if e != "live"] == list(range(10))
+    assert fake.received.count("live") == 10
+
+
+# ------------------------------------------------------------ worker thread
+
+
+def wait_for(predicate: Callable[[], bool], timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
 
 
 def test_worker_flushes_on_batch_size() -> None:
-    client, session = make_client(batch_size=2, batch_timeout=60)
+    client, fake = make_client(batch_size=2, batch_timeout=60)
     client.start()
     client.start()  # idempotent
     try:
         client.send(1)
         client.send(2)
-        deadline = time.monotonic() + 5
-        while session.post.call_count == 0 and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert session.post.call_count == 1
+        assert wait_for(lambda: len(fake.posts) == 1)
     finally:
         client.close()
 
 
 def test_worker_flushes_on_timeout() -> None:
-    client, session = make_client(batch_size=100, batch_timeout=0.05)
+    client, fake = make_client(batch_timeout=0.05)
     client.start()
     try:
         client.send(1)
-        deadline = time.monotonic() + 5
-        while session.post.call_count == 0 and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert session.post.call_count == 1
+        assert wait_for(lambda: fake.received == [1])
     finally:
         client.close()
 
 
-def test_close_flushes_and_closes_session() -> None:
-    client, session = make_client(batch_timeout=60)
+def test_worker_recovers_after_outage(tmp_path: Path) -> None:
+    fake = FakeSplunk(down)
+    client, _ = make_client(
+        fake,
+        spool=make_spool(tmp_path),
+        batch_size=2,
+        batch_timeout=0.02,
+        retry_initial=0.02,
+        retry_max=0.05,
+    )
     client.start()
-    client.send(1)
-    client.close(timeout=5)
-    assert session.post.call_count == 1
-    session.close.assert_called_once()
+    try:
+        for i in range(5):
+            client.send(i)
+        assert wait_for(lambda: client.in_outage)
+        fake.handler = lambda _e: response(200, OK)
+        assert wait_for(lambda: len(fake.received) == 5)
+        assert sorted(fake.received) == list(range(5))
+        assert wait_for(lambda: not client.in_outage)
+    finally:
+        client.close()
 
 
 def test_worker_survives_unexpected_errors(caplog: pytest.LogCaptureFixture) -> None:
-    done = threading.Event()
+    calls = {"n": 0}
 
-    def post(*_args: Any, **_kwargs: Any) -> Any:
-        if not done.is_set():
-            done.set()
-            raise RuntimeError("unexpected")
-        return response(200)
+    def handler(_events: list[dict[str, Any]]) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return RuntimeError("unexpected")
+        return response(200, OK)
 
-    client, session = make_client(batch_size=1, batch_timeout=0.01)
-    session.post.side_effect = post
+    client, fake = make_client(
+        FakeSplunk(handler), batch_size=1, batch_timeout=0.01, retry_initial=0.01
+    )
     client.start()
     try:
         client.send(1)
-        assert done.wait(5)
-        client.send(2)
-        deadline = time.monotonic() + 5
-        while client.sent_count == 0 and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert client.sent_count == 1
+        assert wait_for(lambda: fake.received == [1])
     finally:
         client.close()
-    assert "Unexpected error in Splunk flush worker" in caplog.text
+    assert "Unexpected error in Splunk delivery worker" in caplog.text

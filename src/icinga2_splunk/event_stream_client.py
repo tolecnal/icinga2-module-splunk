@@ -24,6 +24,7 @@ from icinga2_splunk import __version__
 from icinga2_splunk.config import Config, ConfigError
 from icinga2_splunk.perfdata_parser import parse_perfdata
 from icinga2_splunk.splunk_hec_client import SplunkHECClient
+from icinga2_splunk.spool import DiskSpool
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,33 @@ def _as_dict(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
+def build_splunk_client(config: Config) -> SplunkHECClient:
+    """Create the HEC client (and its disk spool, if enabled) from the config.
+
+    Raises:
+        OSError: If the spool directory cannot be created or written.
+    """
+    spool = None
+    if config.spool_dir:
+        spool = DiskSpool(
+            config.spool_dir,
+            max_bytes=int(config.spool_max_size_mb * 1_048_576),
+            max_age=config.spool_max_age_days * 86_400,
+        )
+    else:
+        logger.warning("No spool_dir configured; events are only buffered in memory")
+    return SplunkHECClient(
+        config.splunk_hec_url,
+        config.splunk_hec_token,
+        verify=config.splunk_verify_ssl,
+        batch_size=config.batch_size,
+        batch_timeout=config.batch_timeout,
+        max_queue_size=config.max_queue_size,
+        spool=spool,
+        retry_max=config.retry_max_interval,
+    )
+
+
 class EventStreamClient:
     """Consume the Icinga2 event stream and forward events to Splunk.
 
@@ -81,15 +109,7 @@ class EventStreamClient:
     ) -> None:
         """Set up the client; call :meth:`run` to start consuming."""
         self.config = config
-        self.splunk = splunk or SplunkHECClient(
-            config.splunk_hec_url,
-            config.splunk_hec_token,
-            verify=config.splunk_verify_ssl,
-            batch_size=config.batch_size,
-            batch_timeout=config.batch_timeout,
-            max_queue_size=config.max_queue_size,
-            max_retries=config.max_retries,
-        )
+        self.splunk = splunk or build_splunk_client(config)
         self._session_factory = session_factory
         self._stop = threading.Event()
         self._handlers: dict[str, Callable[[Event], None]] = {
@@ -458,7 +478,11 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_CONFIG_ERROR
     logging.getLogger().setLevel(config.log_level)
 
-    client = EventStreamClient(config)
+    try:
+        client = EventStreamClient(config)
+    except OSError as exc:
+        logger.critical("Cannot open spool directory %s: %s", config.spool_dir, exc)
+        return EXIT_CONFIG_ERROR
     signal.signal(signal.SIGTERM, _raise_shutdown)
     signal.signal(signal.SIGINT, _raise_shutdown)
     try:

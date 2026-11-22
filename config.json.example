@@ -28,7 +28,12 @@
   "batch_size": 100,
   "batch_timeout": 10,
   "max_queue_size": 10000,
-  "max_retries": 3,
+  "retry_max_interval": 60,
+
+  "spool_dir": "/var/lib/icinga2-splunk/spool",
+  "spool_max_size_mb": 1024,
+  "spool_max_age_days": 7,
+
   "heartbeat_timeout": 300,
 
   "log_level": "INFO"
