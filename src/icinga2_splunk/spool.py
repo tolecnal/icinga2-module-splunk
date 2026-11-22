@@ -125,10 +125,8 @@ class DiskSpool:
         self._current.flush()
         os.fsync(self._current.fileno())
         self._current.close()
-        if self._current_bytes:
-            self._segments[self._current_path] = self._current_bytes
-        else:
-            self._current_path.unlink(missing_ok=True)
+        # append() never leaves an empty segment behind, so this is never 0.
+        self._segments[self._current_path] = self._current_bytes
         self._current = None
         self._current_path = None
         self._current_bytes = 0

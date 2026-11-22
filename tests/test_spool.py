@@ -189,3 +189,31 @@ def test_unwritable_directory(tmp_path: Path) -> None:
         pytest.skip("cannot test permissions as root")
     with pytest.raises(PermissionError):
         DiskSpool(directory, max_bytes=100, max_age=10)
+
+
+def test_age_limit_stops_at_first_fresh_segment(make: Any, clock: Clock, tmp_path: Path) -> None:
+    spool = make(max_age=100, segment_max_bytes=1)
+    for name in ("old", "fresh", "current"):
+        spool.append(lines(name))
+    old, fresh, _current = segments(tmp_path)
+    os.utime(old, (clock.now - 200, clock.now - 200))
+    os.utime(fresh, (clock.now - 10, clock.now - 10))
+    spool.enforce_limits()
+    assert [p.exists() for p in (old, fresh)] == [False, True]
+
+
+def test_current_segment_deleted_externally(make: Any, tmp_path: Path) -> None:
+    spool = make()
+    spool.append(lines(1))
+    segments(tmp_path)[0].unlink()
+    spool.enforce_limits()  # must not raise
+
+
+def test_drop_of_externally_deleted_segment(make: Any, tmp_path: Path) -> None:
+    spool = make(max_bytes=120, segment_max_bytes=30)
+    spool.append(lines(1))
+    spool.append(lines(2))
+    segments(tmp_path)[0].unlink()
+    for i in range(10):
+        spool.append(lines(i))
+    assert spool.size_bytes <= 120

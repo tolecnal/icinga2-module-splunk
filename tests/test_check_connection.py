@@ -106,3 +106,9 @@ def test_main_all_pass(tmp_path, base_settings, monkeypatch) -> None:
 def test_main_config_error(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("SPLUNK_HEC_TOKEN", raising=False)
     assert cc.main(["-c", str(tmp_path / "missing.json")]) == 1
+
+
+def test_event_stream_ends_without_event(make_config, capsys) -> None:
+    with mock.patch.object(cc.requests, "post", return_value=response(200, lines=[])):
+        assert cc.check_event_stream(make_config()) is True
+    assert "Received an event" not in capsys.readouterr().out
