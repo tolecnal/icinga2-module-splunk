@@ -1,1 +1,12 @@
-icinga2_splunk/__pycache__/**
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.coverage
+coverage.xml
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

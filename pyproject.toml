@@ -1,0 +1,118 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "icinga2-splunk"
+dynamic = ["version"]
+description = "Stream Icinga2 events and performance data to Splunk via the HTTP Event Collector"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Jostein Elvaker Haande" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: System :: Monitoring",
+    "Typing :: Typed",
+]
+dependencies = ["requests>=2.28,<3"]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.11",
+    "pre-commit>=3.5",
+    "pytest>=8",
+    "pytest-cov>=5",
+    "ruff>=0.8",
+    "types-requests",
+]
+
+[project.scripts]
+icinga2-splunk = "icinga2_splunk.event_stream_client:main"
+icinga2-splunk-check = "icinga2_splunk.check_connection:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "icinga2_splunk.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+icinga2_splunk = ["py.typed"]
+
+# --------------------------------------------------------------------------
+# Ruff: linting (replaces pylint/flake8/isort/pyupgrade/bandit) + formatting
+# --------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "N",        # pep8-naming
+    "UP",       # pyupgrade
+    "B",        # flake8-bugbear
+    "S",        # flake8-bandit (security)
+    "BLE",      # blind except
+    "A",        # shadowing builtins
+    "C4",       # comprehensions
+    "DTZ",      # naive datetimes
+    "T20",      # print statements
+    "SIM",      # simplify
+    "RET",      # return consistency
+    "PTH",      # prefer pathlib
+    "PL",       # pylint rules
+    "RUF",      # ruff-specific
+    "D",        # docstrings
+    "G",        # logging format
+    "LOG",      # logging misuse
+    "TRY",      # exception handling
+]
+ignore = [
+    "D203",     # conflicts with D211
+    "D213",     # conflicts with D212
+    "TRY003",   # long messages in exceptions are fine
+    "PLR0913",  # too many arguments
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "D", "PLR2004", "PLC0415"]
+"src/icinga2_splunk/check_connection.py" = ["T201"]   # interactive CLI output
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+docstring-code-format = true
+
+# --------------------------------------------------------------------------
+# Type checking
+# --------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.10"
+files = ["src"]
+strict = true
+warn_unreachable = true
+
+# --------------------------------------------------------------------------
+# Tests
+# --------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+source = ["icinga2_splunk"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 85
+exclude_also = ["if __name__ == .__main__.:"]
