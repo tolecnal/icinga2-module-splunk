@@ -1,3 +1,18 @@
+icinga2-splunk (2.0.2) unstable; urgency=medium
+
+  * Copy the Icinga2 CA certificate to /etc/icinga2-splunk/icinga2-ca.crt
+    on install and use it in the packaged config; the service user cannot
+    read /var/lib/icinga2/certs.
+  * Check that configured certificate files are readable at startup and
+    exit with a clear error (code 78) instead of crash-looping.
+  * Handle local OSErrors from requests as connection failures.
+  * Warn when a unit left over from a script install overrides the
+    packaged service.
+  * Do not log urllib3's InsecureRequestWarning on every request when TLS
+    verification is disabled.
+
+ -- Jostein Elvaker Haande <jehaande@gmail.com>  Sun, 22 Nov 2026 21:45:00 +0100
+
 icinga2-splunk (2.0.1) unstable; urgency=medium
 
   * Only HTTP 2xx from Splunk HEC counts as delivered; redirects are kept
