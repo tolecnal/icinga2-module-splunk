@@ -18,7 +18,7 @@ classifiers = [
     "Topic :: System :: Monitoring",
     "Typing :: Typed",
 ]
-dependencies = ["requests>=2.28,<3"]
+dependencies = ["requests>=2.25,<3"]
 
 [project.optional-dependencies]
 dev = [

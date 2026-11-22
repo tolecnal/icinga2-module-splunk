@@ -45,7 +45,48 @@ Splunk
 
 ## Installation
 
-### 1. Install the package and service
+### Debian and Ubuntu packages
+
+Packages are built for Debian 12 and 13 and for Ubuntu 22.04, 24.04 and 26.04. Each
+[release](https://github.com/tolecnal/icinga2-module-splunk/releases) has one `.deb`
+per distribution release, e.g. `icinga2-splunk_2.0.0~deb12_all.deb` or
+`icinga2-splunk_2.0.0~ubuntu24.04_all.deb`.
+
+First create the Icinga2 API user and the Splunk HEC token (steps 2 and 3 of the script
+install below). Then:
+
+```bash
+sudo apt install ./icinga2-splunk_2.0.0~deb12_all.deb
+sudoedit /etc/icinga2-splunk/splunk_config.json
+sudo -u icinga2-splunk icinga2-splunk-check
+sudo systemctl enable --now icinga2-splunk
+```
+
+The package differs from the script install below:
+
+| Item              | Package                                   | `install.sh`                       |
+| ----------------- | ----------------------------------------- | ---------------------------------- |
+| Code              | `/usr/lib/python3/dist-packages`, system `python3-requests` | virtualenv in `/opt/icinga2-splunk` |
+| Config            | `/etc/icinga2-splunk/splunk_config.json`  | `/etc/icinga2/splunk_config.json`  |
+| Environment file  | `/etc/default/icinga2-splunk`             | `/etc/icinga2/splunk.env`          |
+| Service user      | `icinga2-splunk` (created by the package) | `nagios` (or `SERVICE_USER`)       |
+
+The service isn't enabled on install because it needs configuring first. Once you
+enable it, package upgrades restart it. `apt purge` also deletes the disk spool.
+
+Because the service runs as its own user, it can't read Icinga2's private
+`/var/lib/icinga2/certs` directory. Copy the CA certificate (and any client
+certificate) somewhere it can read, for example:
+
+```bash
+sudo install -m 0644 /var/lib/icinga2/certs/ca.crt /etc/icinga2-splunk/ca.crt
+```
+
+Then set `"icinga2_api_verify_ssl": "/etc/icinga2-splunk/ca.crt"`.
+
+### Script install (any distribution)
+
+#### 1. Install the package and service
 
 ```bash
 git clone https://github.com/tolecnal/icinga2-module-splunk.git
@@ -68,7 +109,7 @@ Example:
 sudo SERVICE_USER=icinga PYTHON=python3.12 ./scripts/install.sh
 ```
 
-### 2. Create an Icinga2 API user
+#### 2. Create an Icinga2 API user
 
 ```
 object ApiUser "splunk" {
@@ -81,13 +122,13 @@ object ApiUser "splunk" {
 types you subscribe to, e.g. `events/statechange` and `events/checkresult`. Restart
 Icinga2 after you add the user.
 
-### 3. Configure Splunk HEC
+#### 3. Configure Splunk HEC
 
 1. Go to **Settings > Data Inputs > HTTP Event Collector** and create a token.
 2. Allow the `icinga2_events` and `icinga2_perfdata` indexes for the token.
 3. Create the indexes under **Settings > Indexes** if they don't exist.
 
-### 4. Configure the integration
+#### 4. Configure the integration
 
 Edit `/etc/icinga2/splunk_config.json`. See
 [`config.json.example`](config.json.example) for all options.
@@ -112,7 +153,7 @@ ICINGA2_API_PASSWORD=your-secure-password
 SPLUNK_HEC_TOKEN=your-hec-token
 ```
 
-### 5. Test and start
+#### 5. Test and start
 
 ```bash
 sudo -u nagios /opt/icinga2-splunk/bin/icinga2-splunk-check
@@ -256,9 +297,28 @@ make format  # auto-fix lint issues and reformat
 ```
 
 Tools: [ruff](https://docs.astral.sh/ruff/) (linting, including bandit security rules,
-and formatting), mypy (strict), pytest with coverage (minimum 85%), shellcheck and
+and formatting), mypy (strict), pytest with 100% line and branch coverage (enforced), shellcheck and
 gitleaks (through pre-commit). CI runs the same checks on Python 3.10–3.14. It also
 builds and smoke-tests the wheel and runs `pip-audit`.
+
+### Building packages
+
+```bash
+make deb                                 # all five releases, in Docker
+make deb IMAGES="debian:12 ubuntu:22.04" # selected releases
+```
+
+`packaging/docker-build.sh` builds each package in a container of the target release.
+It runs the test suite and lintian during the build. It then installs, checks and
+purges the package in a fresh container. The packages are written to `dist/deb/`.
+
+The **Debian packages** workflow does the same on every push and pull request. When a
+`v*` tag is pushed, it attaches the packages to the GitHub release. For a release:
+
+1. Bump `__version__` in `src/icinga2_splunk/__init__.py`.
+2. Add a matching `debian/changelog` entry (`dch -v X.Y.Z`). The build fails if the two
+   versions differ.
+3. Merge, then tag `vX.Y.Z` and push the tag.
 
 The `icinga2_config/features-available/splunk.conf` file is an unrelated alternative
 setup. It writes perfdata files that a Splunk Universal Forwarder can monitor.

@@ -2,7 +2,7 @@
 VENV ?= .venv
 PY   := $(VENV)/bin/python
 
-.PHONY: dev lint format typecheck test check clean
+.PHONY: dev lint format typecheck test check deb clean
 
 $(PY):
 	python3 -m venv $(VENV)
@@ -28,6 +28,9 @@ test:  ## Run the test suite with coverage
 
 check: lint typecheck test  ## Everything CI runs on Python code
 	$(VENV)/bin/pre-commit run --all-files
+
+deb:  ## Build and install-test .debs in Docker (IMAGES="debian:12 ubuntu:24.04" to limit)
+	packaging/docker-build.sh $(IMAGES)
 
 clean:
 	rm -rf build dist *.egg-info src/*.egg-info .coverage coverage.xml htmlcov \

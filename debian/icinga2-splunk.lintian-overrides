@@ -1,0 +1,3 @@
+# Holds API credentials and the HEC token; postinst makes it root:icinga2-splunk.
+# (Wildcard form so both old and new lintian versions match it.)
+icinga2-splunk: non-standard-file-perm *etc/icinga2-splunk/splunk_config.json*

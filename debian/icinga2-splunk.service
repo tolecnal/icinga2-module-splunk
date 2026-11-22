@@ -1,0 +1,53 @@
+[Unit]
+Description=Icinga2 to Splunk Event Stream Integration
+Documentation=https://github.com/tolecnal/icinga2-module-splunk
+After=network-online.target icinga2.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=icinga2-splunk
+Group=icinga2-splunk
+Environment=PYTHONUNBUFFERED=1
+Environment=ICINGA2_SPLUNK_CONFIG=/etc/icinga2-splunk/splunk_config.json
+# Optional environment overrides, e.g. SPLUNK_HEC_TOKEN=... (mode 0600).
+EnvironmentFile=-/etc/default/icinga2-splunk
+ExecStart=/usr/bin/icinga2-splunk
+# Disk spool for events while Splunk is unavailable (spool_dir default).
+StateDirectory=icinga2-splunk
+StateDirectoryMode=0700
+Restart=always
+RestartSec=10
+# Exit code 78 (EX_CONFIG) means invalid configuration: don't restart-loop.
+RestartPreventExitStatus=78
+TimeoutStopSec=60
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
